@@ -1,0 +1,12 @@
+name: MX Driver DMA Test Suite
+description: "MX Driver DMA Test Suite"
+test_scope_includes:
+  - .ci
+working_repository: sdk_release
+targets:
+  qemu:
+    - commons:
+       - ssh_port: 10000
+    - teardown:
+       - pwd && sudo ./kill_bg.sh
+       - sudo pkill -f 'qemu_sim_0 xcena.dev0'

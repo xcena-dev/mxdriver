@@ -1,0 +1,243 @@
+name: Sync to Public Repo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      root_directory:
+        description: 'Root directory for sync (default: current directory)'
+        required: false
+        default: '.'
+        type: string
+      ignore_file:
+        description: 'Ignore file path (default: .ignore_syn_push)'
+        required: false
+        default: '.ignore_syn_push'
+        type: string
+      public_repo_url:
+        description: 'Public repository URL'
+        required: false
+        default: 'https://github.com/metisx-dev/mxdriver.git'
+        type: string
+      target_branch:
+        description: 'Target branch for public repo (default: main)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+
+      - name: Set variables
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "root_directory=${{ github.event.inputs.root_directory }}" >> $GITHUB_OUTPUT
+            echo "ignore_file=${{ github.event.inputs.ignore_file }}" >> $GITHUB_OUTPUT
+            echo "public_repo_url=${{ github.event.inputs.public_repo_url }}" >> $GITHUB_OUTPUT
+            echo "target_branch=${{ github.event.inputs.target_branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "root_directory=." >> $GITHUB_OUTPUT
+            echo "ignore_file=.ignore_syn_push" >> $GITHUB_OUTPUT
+            echo "public_repo_url=https://github.com/metisx-dev/mxdriver.git" >> $GITHUB_OUTPUT
+            echo "target_branch=main" >> $GITHUB_OUTPUT
+          fi
+      - name: Remove files based on ignore list and prepare for sync
+        run: |
+          ROOT_DIR="${{ steps.vars.outputs.root_directory }}"
+          IGNORE_FILE="${{ steps.vars.outputs.ignore_file }}"
+
+          echo "Working directory: $ROOT_DIR"
+          echo "Ignore file: $IGNORE_FILE"
+
+          # Create a temporary directory for clean sync
+          TEMP_SYNC_DIR=$(mktemp -d)
+          echo "Created temporary sync directory: $TEMP_SYNC_DIR"
+
+          # Copy files to temp directory (excluding .git)
+          if [ "$ROOT_DIR" != "." ]; then
+            echo "Copying from $ROOT_DIR to temp directory..."
+            if [ -d "$ROOT_DIR" ]; then
+              # Copy files excluding .github and .gitignore
+              find "$ROOT_DIR" -maxdepth 1 ! -path "$ROOT_DIR" ! -name '.github' ! -name '.gitignore' -exec cp -r {} "$TEMP_SYNC_DIR/" \; 2>/dev/null || echo "No files to copy from $ROOT_DIR"
+            else
+              echo "Error: Root directory $ROOT_DIR does not exist"
+              exit 1
+            fi
+          else
+            echo "Copying all files to temp directory (excluding .git, .github, .gitignore)..."
+            find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' ! -name '.gitignore' -exec cp -r {} "$TEMP_SYNC_DIR/" \; 2>/dev/null || true
+          fi
+
+          # Process ignore file if it exists
+          if [ -f "$IGNORE_FILE" ]; then
+            echo "Found ignore file: $IGNORE_FILE"
+            echo "Processing files/folders to remove..."
+            while IFS= read -r line || [ -n "$line" ]; do
+              # Skip empty lines and comments
+              if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
+                continue
+              fi
+
+              target="$TEMP_SYNC_DIR/$line"
+              if [ -e "$target" ]; then
+                echo "Removing: $line"
+                rm -rf "$target"
+              else
+                echo "Not found (skipping): $line"
+              fi
+            done < "$IGNORE_FILE"
+
+            # Remove the ignore file itself from temp directory
+            IGNORE_FILE_IN_TEMP="$TEMP_SYNC_DIR/$(basename "$IGNORE_FILE")"
+            if [ -f "$IGNORE_FILE_IN_TEMP" ]; then
+              echo "Removing ignore file from temp directory: $(basename "$IGNORE_FILE")"
+              rm -f "$IGNORE_FILE_IN_TEMP"
+            fi
+          else
+            echo "No ignore file found at: $IGNORE_FILE"
+          fi
+
+          # Save temp directory path for next step
+          echo "TEMP_SYNC_DIR=$TEMP_SYNC_DIR" >> $GITHUB_ENV
+      - name: Push to public repo
+        env:
+          GIT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
+        run: |
+          PUBLIC_REPO_URL="${{ steps.vars.outputs.public_repo_url }}"
+          TARGET_BRANCH="${{ steps.vars.outputs.target_branch }}"
+
+          echo "🎯 Target branch: $TARGET_BRANCH"
+
+          # Check if token is available
+          if [[ -z "$GIT_TOKEN" ]]; then
+            echo "❌ Error: METISX_GIT_ACTION_ACCESS_TOKEN secret is not set!"
+            echo ""
+            echo "Please make sure the METISX_GIT_ACTION_ACCESS_TOKEN secret is configured in your repository."
+            exit 1
+          fi
+
+          # Prepare URL with token
+          if [[ "$PUBLIC_REPO_URL" == *"<GIT_TOKEN>"* ]]; then
+            PUBLIC_REPO_URL="${PUBLIC_REPO_URL//<GIT_TOKEN>/$GIT_TOKEN}"
+          elif [[ "$PUBLIC_REPO_URL" == https://github.com/* ]] && [[ -n "$GIT_TOKEN" ]]; then
+            PUBLIC_REPO_URL="${PUBLIC_REPO_URL/https:\/\/github.com\//https://$GIT_TOKEN@github.com/}"
+          fi
+
+          # Clone existing public repo to compare
+          echo "🔄 Checking existing public repository..."
+          EXISTING_REPO_DIR=$(mktemp -d)
+          if git clone "$PUBLIC_REPO_URL" "$EXISTING_REPO_DIR" 2>/dev/null; then
+            echo "✅ Public repository exists, will sync changes only"
+
+            # Copy new files to existing repo (excluding .git)
+            cd "$EXISTING_REPO_DIR"
+
+            # Check if target branch exists, if not create it
+            if git show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
+              echo "📍 Branch '$TARGET_BRANCH' exists, switching to it"
+              git checkout "$TARGET_BRANCH"
+            elif git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+              echo "📍 Branch '$TARGET_BRANCH' exists on remote, checking out"
+              git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            else
+              echo "🆕 Creating new branch '$TARGET_BRANCH'"
+              git checkout -b "$TARGET_BRANCH"
+            fi
+
+            # Remove all files except .git, .github, and .gitignore
+            find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' ! -name '.gitignore' -exec rm -rf {} + 2>/dev/null || true
+
+            # Copy new content
+            cp -r "$TEMP_SYNC_DIR"/* . 2>/dev/null || true
+
+            # Check if there are actual changes
+            git add .
+            if git diff --staged --quiet; then
+              echo "ℹ️  No changes detected, skipping push"
+            else
+              echo "📝 Changes detected, creating commit..."
+
+              # Get the latest commit info from the source (private) repo
+              cd "$GITHUB_WORKSPACE"
+              LATEST_COMMIT_HASH=$(git rev-parse HEAD)
+              LATEST_COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+              LATEST_COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an <%ae>")
+              LATEST_COMMIT_DATE=$(git log -1 --pretty=format:"%ad" --date=iso)
+
+              cd "$EXISTING_REPO_DIR"
+
+              # Get status summary
+              ADDED_COUNT=$(git status --porcelain | grep -c "^A " || echo "0")
+              MODIFIED_COUNT=$(git status --porcelain | grep -c "^M " || echo "0")
+              DELETED_COUNT=$(git status --porcelain | grep -c "^D " || echo "0")
+              TOTAL_COUNT=$(git status --porcelain | wc -l)
+
+              echo "📊 Status: $TOTAL_COUNT files changed ($ADDED_COUNT added, $MODIFIED_COUNT modified, $DELETED_COUNT deleted)"
+
+              # Create commit message with original commit info
+              COMMIT_MSG="Sync: $LATEST_COMMIT_MSG
+
+              Original commit: $LATEST_COMMIT_HASH
+              Author: $LATEST_COMMIT_AUTHOR
+              Date: $LATEST_COMMIT_DATE
+
+              Sync summary: $TOTAL_COUNT files changed
+              Synced at: $(date '+%Y-%m-%d %H:%M:%S')"
+
+              git config --global user.name "github-actions"
+              git config --global user.email "actions@github.com"
+              git commit -m "$COMMIT_MSG"
+              git push origin "$TARGET_BRANCH"
+              echo "✅ Successfully pushed changes to public repository (branch: $TARGET_BRANCH)"
+            fi
+
+            # Cleanup existing repo
+            cd /
+            rm -rf "$EXISTING_REPO_DIR"
+
+          else
+            echo "📦 Public repository doesn't exist, creating initial commit..."
+
+            # Initialize new repo in temp directory
+            cd "$TEMP_SYNC_DIR"
+            git init
+            git config --global user.name "github-actions"
+            git config --global user.email "actions@github.com"
+            git remote add origin "$PUBLIC_REPO_URL"
+            git add .
+
+            # Get the latest commit info from the source (private) repo for initial sync
+            cd "$GITHUB_WORKSPACE"
+            LATEST_COMMIT_HASH=$(git rev-parse HEAD)
+            LATEST_COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+            LATEST_COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an <%ae>")
+            LATEST_COMMIT_DATE=$(git log -1 --pretty=format:"%ad" --date=iso)
+
+            cd "$TEMP_SYNC_DIR"
+            TOTAL_COUNT=$(git status --porcelain | wc -l)
+
+            # Create initial commit message with original commit info
+            INITIAL_COMMIT_MSG="Initial sync: $LATEST_COMMIT_MSG
+
+            Original commit: $LATEST_COMMIT_HASH
+            Author: $LATEST_COMMIT_AUTHOR
+            Date: $LATEST_COMMIT_DATE
+
+            Initial sync: $TOTAL_COUNT files added
+            Synced at: $(date '+%Y-%m-%d %H:%M:%S')"
+
+            git commit -m "$INITIAL_COMMIT_MSG"
+            git push --set-upstream origin "$TARGET_BRANCH"
+            echo "✅ Successfully created public repository with initial content (branch: $TARGET_BRANCH)"
+          fi
+
+          # Cleanup
+          cd /
+          rm -rf "$TEMP_SYNC_DIR"
+          echo "🧹 Cleaned up temporary directory"
