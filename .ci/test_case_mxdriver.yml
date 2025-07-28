@@ -13,7 +13,7 @@
     - pr
 - name: mxdriver_dma_cxl_5_15
   command:
-    - cd emulator && ./setup.sh  --dev --config cfg/setup-5.15.conf
+    - cd emulator && ./setup.sh --dev --config cfg/setup-5.15.conf
     - sudo ./run.sh --bg
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
