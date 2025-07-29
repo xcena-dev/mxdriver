@@ -33,22 +33,9 @@ struct mx_queue_v2 {
 
 
 struct mx_command {
-#if 0
 	uint8_t opcode;
 	uint8_t flags;
 	uint16_t command_id;
-#else
-	union {
-		uint32_t header;
-		struct {
-			uint32_t opcode : 5;
-			uint32_t command_id : 16;
-			uint32_t barrier_index : 6;
-			uint32_t multi_page : 2;
-			uint32_t rsvd : 3;
-		};
-	};
-#endif
 	uint32_t rsvd1;
 	uint64_t rsvd2;
 	uint64_t rsvd3;
@@ -65,7 +52,7 @@ struct mx_command {
 	};
 	uint64_t size;
 	uint64_t rsvd4;
-};
+} __packed;
 
 struct mx_completion
 {
@@ -74,7 +61,7 @@ struct mx_completion
 	uint16_t sq_head;
 	uint16_t status;
 	uint16_t command_id;
-};
+} __packed;
 
 /******************************************************************************/
 /* Queue helpers                                                              */
@@ -218,7 +205,7 @@ static int complete_handler(void *arg)
 static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
+	struct scatterlist *sg;
 	uint64_t *desc;
 	int total_desc_cnt;
 	int list_cnt, list_idx, desc_idx;
@@ -227,7 +214,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	/* Get num of desc list will be desc count of last list */
 	list_cnt = 1;
-	total_desc_cnt = transfer->pages_nr;
+	total_desc_cnt = transfer->pages_nr - 1;
 	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
 		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
 		list_cnt++;
@@ -244,6 +231,9 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	for_each_sgtable_dma_sg(sgt, sg, i) {
 		dma_addr_t dma_addr = sg_dma_address(sg);
+
+		if (i == 0)
+			continue;
 
 		if (desc_idx == NUM_OF_DESC_PER_LIST - 1) {
 			if (sg_next(sg)) {
@@ -268,7 +258,7 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 		return NULL;
 	}
 
-	comm->opcode = opcode + 4; // FIXME
+	comm->opcode = opcode;
 	comm->command_id = transfer->id;
 	comm->size = transfer->size;
 	comm->device_addr = transfer->device_addr;
@@ -281,7 +271,6 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 	struct mx_command *comm;
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
-	unsigned int size;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
@@ -289,20 +278,25 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 		return NULL;
 	}
 
-	size = (PAGE_SIZE - sg->offset) % SINGLE_DMA_SIZE;
-	size = size ? size : SINGLE_DMA_SIZE;
+	comm->prp_entry1 = sg_dma_address(sg);
+	if (!comm->prp_entry1) {
+		pr_warn("Failed to get sg_dma_address\n");
+		kfree(comm);
+		return NULL;
+	}
 
-	if (transfer->size <= size) {
-		comm->host_addr = sg_dma_address(sg);
-		if (!comm->host_addr) {
+	if (transfer->pages_nr == 1) {
+		comm->prp_entry2 = 0;
+	} else if (transfer->pages_nr == 2) {
+		comm->prp_entry2 = sg_dma_address(sg_next(sg));
+		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
 			kfree(comm);
 			return NULL;
 		}
 	} else {
-		comm->multi_page = 1;
-		comm->prp_entry1 = desc_list_init(dev, transfer);
-		if (!comm->prp_entry1) {
+		comm->prp_entry2 = desc_list_init(dev, transfer);
+		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
 			kfree(comm);
 			return NULL;
@@ -350,8 +344,8 @@ static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q
 	if (!queue->sqes)
 		dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
 
-	pr_info("Allocated queue (depth=%u, cq_dma_addr=0x%llx, sq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
-			queue->depth, queue->cq_dma_addr, queue->sq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
+	pr_info("Allocated queue (depth=%u, sq_dma_addr=0x%llx, cq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
+			queue->depth, queue->sq_dma_addr, queue->cq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
 
 	return 0;
 }
