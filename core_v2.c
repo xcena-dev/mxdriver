@@ -66,34 +66,39 @@ struct mx_completion
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
+static bool is_sqe_full(struct mx_queue_v2 *queue)
+{
+       return (queue->sq_tail + 1) % queue->depth == queue->sq_head;
+}
+
 static bool is_cqe_pending(struct mx_queue_v2 *queue)
 {
 	struct mx_completion *cqe = &queue->cqes[queue->cq_head];
-
 	uint16_t status = le16_to_cpu(READ_ONCE(cqe->status));
 	uint16_t phase = (status >> 15) & 1;
+
 	return phase == queue->cq_phase;
 }
 
-static bool is_sqe_full(struct mx_queue_v2 *queue)
-{
-	return (queue->sq_tail + 1) % queue->depth == queue->sq_head;
-}
-
-static void *get_sqe_ptr(struct mx_queue_v2 *queue)
+static int push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
 {
 	if (is_sqe_full(queue))
-		return NULL;
+		return -EAGAIN;
 
-	return &queue->sqes[queue->sq_tail];
+	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+
+	return 0;
 }
 
-static void *get_cqe_ptr(struct mx_queue_v2 *queue)
+static int pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
 {
 	if (!is_cqe_pending(queue))
-		return NULL;
+		return -EAGAIN;
 
-	return &queue->cqes[queue->cq_head];
+	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	queue->sq_head = cmpl->sq_head;
+
+	return 0;
 }
 
 static void update_sq_doorbell(struct mx_queue_v2 *queue)
@@ -138,7 +143,6 @@ static int submit_handler(void *arg)
 {
 	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
 	struct mx_transfer *transfer, *tmp;
-	struct mx_command *comm;
 	unsigned long flags;
 
 	while (!kthread_should_stop()) {
@@ -149,11 +153,7 @@ static int submit_handler(void *arg)
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
-			comm = (struct mx_command *)get_sqe_ptr(queue);
-			if (!comm)
-				break;
-
-			memcpy(comm, transfer->command, sizeof(struct mx_command));
+			push_mx_command(queue, transfer->command);
 			update_sq_doorbell(queue);
 			list_del(&transfer->entry);
 
@@ -172,22 +172,21 @@ static int complete_handler(void *arg)
 {
 	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
 	struct mx_transfer *transfer;
-	struct mx_completion *cmpl;
+	struct mx_completion cmpl;
+	int ret;
 
 	while (!kthread_should_stop()) {
-		cmpl = (struct mx_completion *)get_cqe_ptr(queue);
-		if (!cmpl) {
+		ret = pop_mx_completion(queue, &cmpl);
+		if (ret) {
 			msleep(POLLING_INTERVAL_MSEC);
 			continue;
 		}
 
-		transfer = find_transfer_by_id(READ_ONCE(cmpl->command_id));
+		transfer = find_transfer_by_id(cmpl.command_id);
 		if (transfer && !transfer->nowait) {
-			transfer->result = READ_ONCE(cmpl->result);
+			transfer->result = cmpl.result;
 			complete(&transfer->done);
 		}
-
-		queue->sq_head = READ_ONCE(cmpl->sq_head);
 
 		update_cq_doorbell(queue);
 		ring_cq_doorbell(queue);
@@ -416,28 +415,29 @@ static int release_admin_queue(struct mx_pci_dev *mx_pdev)
 	return release_queue(&mx_pdev->pdev->dev, (struct mx_queue_v2 *)mx_pdev->admin_queue);
 }
 
-static uint64_t submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c)
+static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
-	struct mx_command *comm;
-	struct mx_completion *cmpl;
+	struct mx_completion cmpl;
+	int ret;
 
-	comm = (struct mx_command *)get_sqe_ptr(queue);
-	if (!comm)
-		return -EAGAIN;
+	ret = push_mx_command(queue, c);
+	if (ret)
+		return ret;
 
-	memcpy(comm, c, sizeof(struct mx_command));
 	update_sq_doorbell(queue);
 	ring_sq_doorbell(queue);
 
 	do {
-		cmpl = (struct mx_completion *)get_cqe_ptr(queue);
-	} while (!cmpl);
+		ret = pop_mx_completion(queue, &cmpl);
+	} while (ret);
 
-	queue->sq_head = READ_ONCE(cmpl->sq_head);
 	update_cq_doorbell(queue);
 	ring_cq_doorbell(queue);
 
-	return cmpl->result;
+	if (result)
+		*result = cmpl.result;
+
+	return 0;
 }
 
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
@@ -446,6 +446,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
 	struct mx_command comm = {};
+	uint64_t result;
 	uint16_t cq_id, sq_id;
 	int ret;
 
@@ -458,12 +459,28 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
-	cq_id = submit_sync_command(admin_queue, &comm);
+	do {
+		ret = submit_sync_command(admin_queue, &comm, &result);
+	} while (ret == -EAGAIN);
+	if (ret) {
+		pr_err("Failed to create IO completion queue (err=%d)\n", ret);
+		release_queue(dev, io_queue);
+		return ret;
+	}
+	cq_id = le16_to_cpu(result);
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
-	sq_id = submit_sync_command(admin_queue, &comm);
+	do {
+		ret = submit_sync_command(admin_queue, &comm, &result);
+	} while (ret == -EAGAIN);
+	if (ret) {
+		pr_err("Failed to create IO submission queue (err=%d)\n", ret);
+		release_queue(dev, io_queue);
+		return ret;
+	}
+	sq_id = le16_to_cpu(result);
 
 	if (cq_id != sq_id) {
 		pr_err("Failed to create IO queue (cq_id=%d, sq_id=%d)\n", cq_id, sq_id);
@@ -495,11 +512,23 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
 	comm.io_queue_info.cq_id = io_queue->qid;
-	submit_sync_command(admin_queue, &comm);
+	do {
+		ret = submit_sync_command(admin_queue, &comm, NULL);
+	} while (ret == -EAGAIN);
+	if (ret) {
+		pr_err("Failed to delete IO completion queue (err=%d)\n", ret);
+		return ret;
+	}
 
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
 	comm.io_queue_info.sq_id = io_queue->qid;
-	submit_sync_command(admin_queue, &comm);
+	do {
+		ret = submit_sync_command(admin_queue, &comm, NULL);
+	} while (ret == -EAGAIN);
+	if (ret) {
+		pr_err("Failed to delete IO submission queue (err=%d)\n", ret);
+		return ret;
+	}
 
 	ret = release_queue(dev, io_queue);
 	if (ret)
