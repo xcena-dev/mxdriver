@@ -1,0 +1,25 @@
+name: Advanced PR Check
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, edited]
+  pull_request_review:
+    types: [submitted, edited]
+
+jobs:
+  check-external-approvals:
+    name: Check External PR Approvals
+    uses: metisx-dev/.github/.github/workflows/check-external-pr-approvals.yml@main
+    with:
+      minimum-approvals: 1
+    secrets:
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
+
+  # 조건부 병합 허용
+  # auto-merge:
+  #  runs-on: ubuntu-latest
+  #  needs: check-external-approvals
+  #  if: needs.check-external-approvals.outputs.check-result == 'success'
+  #  steps:
+  #    - name: Enable auto-merge
+  #      run: echo "외부 PR 승인 조건을 만족하여 자동 병합을 활성화합니다."

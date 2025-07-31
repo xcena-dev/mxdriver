@@ -1,0 +1,16 @@
+# Add PR Label from PR Message
+
+name: Use Add PR Label from PR Message
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  call-label-from-pr:
+    uses: metisx-dev/.github/.github/workflows/added_label_template_repo.yml@main
+    with:
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+    secrets:
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
