@@ -7,6 +7,22 @@ targets:
   qemu:
     - commons:
        - ssh_port: 10000
-    - teardown:
-       - pwd && cd emulator && sudo ./kill_bg.sh
-       - sudo pkill -f 'qemu_sim_0 xcena.dev0'
+    - post:
+      - success:
+        - ./.ci/qemu/post.success.sh
+      - failure:
+        - ./.ci/qemu/post.failure.sh
+    - exit:
+      - ./.ci/qemu/exit.sh
+  qemu_system:
+    - build:
+      - ./.ci/qemu/build.sh
+    - init:
+      - ./.ci/qemu/init.sh
+    - post:
+      - success:
+        - ./.ci/qemu/post.success.sh
+      - failure:
+        - ./.ci/qemu/post.failure.sh
+    - exit:
+      - ./.ci/qemu/exit.sh

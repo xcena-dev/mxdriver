@@ -11,6 +11,7 @@
   tags:
     - push
     - pr
+
 - name: mxdriver_dma_cxl_6_10_mx1s
   command:
     - cd emulator && ./setup.sh --dev
@@ -24,6 +25,7 @@
   tags:
     - push
     - pr
+
 - name: mxdriver_dma_cxl_5_15
   command:
     - cd emulator && ./setup.sh --dev --config cfg/setup-5.15.conf
@@ -37,3 +39,46 @@
   tags:
     - push
     - pr
+
+- name: "qemu test"
+  description: "Normal test"
+  targets:
+    - qemu_system
+  tags:
+    - push
+    - pr
+  setup:
+    - ./.ci/qemu/tests/normal/setup.sh
+  command:
+    - ./.ci/qemu/tests/normal/command.sh
+  teardown:
+    - ./.ci/qemu/tests/normal/teardown.sh
+
+- name: "qemu test with no-kvm"
+  description: "QEMU No-KVM Test"
+  targets:
+    - qemu_system
+  tags:
+    - push
+    - pr
+  setup:
+    - ./.ci/qemu/tests/no_kvm/setup.sh
+  command:
+    - ./.ci/qemu/tests/no_kvm/command.sh
+  teardown:
+    - ./.ci/qemu/tests/no_kvm/teardown.sh
+
+- name: "qemu test with dump"
+  description: "QEMU Dump Test"
+  targets:
+    - qemu_system
+  tags:
+    - push
+    - pr
+  setup:
+    - ./.ci/qemu/tests/dump/setup.sh
+  command:
+    - ./.ci/qemu/tests/dump/command.sh
+  teardown:
+    - ./.ci/qemu/tests/dump/teardown.sh
+
