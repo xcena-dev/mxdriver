@@ -43,7 +43,6 @@ struct mx_queue_v1 {
 	struct mx_queue common;
 	struct mx_mbox sq_mbox;
 	struct mx_mbox cq_mbox;
-	atomic_t wait_count;
 };
 
 struct mx_command {
@@ -99,9 +98,6 @@ static bool is_pushable(struct mx_queue_v1 *queue)
 	static uint64_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->sq_mbox;
 
-	if (list_empty(&queue->common.sq_list))
-		return false;
-
 	mbox->ctx.u64 = readq(mbox->ctx_addr);
 
 	return get_free_space(mbox) >= data_count;
@@ -112,7 +108,7 @@ static bool is_popable(struct mx_queue_v1 *queue)
 	static uint64_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->cq_mbox;
 
-	if (atomic_read(&queue->wait_count) == 0)
+	if (atomic_read(&queue->common.wait_count) == 0)
 		return false;
 
 	mbox->ctx.u64 = readq(mbox->ctx_addr);
@@ -178,27 +174,30 @@ static int submit_handler(void *arg)
 {
 	struct mx_queue_v1 *queue = (struct mx_queue_v1 *)arg;
 	struct mx_mbox *sq_mbox = &queue->sq_mbox;
-	struct mx_transfer *transfer;
+	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 
 	while (kthread_should_stop() == false) {
-		if (!is_pushable(queue)) {
-			msleep(POLLING_INTERVAL_MSEC);
-			continue;
-		}
+		__swait_event_interruptible_timeout(queue->common.sq_wait,
+				!list_empty(&queue->common.sq_list),
+				POLLING_INTERVAL_MSEC);
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
-		transfer = list_first_entry(&queue->common.sq_list, struct mx_transfer, entry);
-		list_del(&transfer->entry);
-		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
+		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
+			if (!is_pushable(queue))
+				break;
 
-		push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
+			push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
+			list_del(&transfer->entry);
 
-		if (transfer->nowait) {
-			complete(&transfer->done);
-		} else {
-			atomic_inc(&queue->wait_count);
+			if (transfer->nowait) {
+				complete(&transfer->done);
+			} else {
+				atomic_inc(&queue->common.wait_count);
+				swake_up_one(&queue->common.cq_wait);
+			}
 		}
+		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 	}
 
 	return 0;
@@ -212,20 +211,21 @@ static int complete_handler(void *arg)
 	struct mx_command comm;
 
 	while (kthread_should_stop() == false) {
-		if (!is_popable(queue)) {
-			msleep(POLLING_INTERVAL_MSEC);
-			continue;
+		__swait_event_interruptible_timeout(queue->common.cq_wait,
+				atomic_read(&queue->common.wait_count) > 0,
+				POLLING_INTERVAL_MSEC);
+
+		while (is_popable(queue)) {
+			pop_mx_command(cq_mbox, &comm);
+			atomic_dec(&queue->common.wait_count);
+
+			transfer = find_transfer_by_id(comm.id);
+			if (!transfer)
+				continue;
+
+			transfer->result = comm.host_addr;
+			complete(&transfer->done);
 		}
-
-		pop_mx_command(cq_mbox, &comm);
-		atomic_dec(&queue->wait_count);
-
-		transfer = find_transfer_by_id(comm.id);
-		if (!transfer)
-			continue;
-
-		transfer->result = comm.host_addr;
-		complete(&transfer->done);
 	}
 
 	return 0;
@@ -439,7 +439,9 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	spin_lock_init(&queue->common.sq_lock);
 	INIT_LIST_HEAD(&queue->common.sq_list);
-	atomic_set(&queue->wait_count, 0);
+	init_swait_queue_head(&queue->common.sq_wait);
+	init_swait_queue_head(&queue->common.cq_wait);
+	atomic_set(&queue->common.wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(submit_handler, queue, "mx_submit_thd%d", mx_pdev->dev_id);
 	mx_pdev->complete_thread = kthread_run(complete_handler, queue, "mx_complete_thd%d", mx_pdev->dev_id);

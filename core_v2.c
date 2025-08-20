@@ -146,10 +146,9 @@ static int submit_handler(void *arg)
 	unsigned long flags;
 
 	while (!kthread_should_stop()) {
-		if (list_empty(&queue->common.sq_list)) {
-			msleep(POLLING_INTERVAL_MSEC);
-			continue;
-		}
+		__swait_event_interruptible_timeout(queue->common.sq_wait,
+				!list_empty(&queue->common.sq_list),
+				POLLING_INTERVAL_MSEC);
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
@@ -157,8 +156,12 @@ static int submit_handler(void *arg)
 			update_sq_doorbell(queue);
 			list_del(&transfer->entry);
 
-			if (transfer->nowait)
+			if (transfer->nowait) {
 				complete(&transfer->done);
+			} else {
+				atomic_inc(&queue->common.wait_count);
+				swake_up_one(&queue->common.cq_wait);
+			}
 		}
 		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 
@@ -176,20 +179,26 @@ static int complete_handler(void *arg)
 	int ret;
 
 	while (!kthread_should_stop()) {
-		ret = pop_mx_completion(queue, &cmpl);
-		if (ret) {
-			msleep(POLLING_INTERVAL_MSEC);
+		__swait_event_interruptible_timeout(queue->common.cq_wait,
+				atomic_read(&queue->common.wait_count) > 0,
+				POLLING_INTERVAL_MSEC);
+
+		if (atomic_read(&queue->common.wait_count) <= 0)
 			continue;
-		}
 
-		transfer = find_transfer_by_id(cmpl.command_id);
-		if (transfer && !transfer->nowait) {
-			transfer->result = cmpl.result;
-			complete(&transfer->done);
-		}
+		do {
+			ret = pop_mx_completion(queue, &cmpl);
+			transfer = find_transfer_by_id(cmpl.command_id);
+			if (transfer && !transfer->nowait) {
+				transfer->result = cmpl.result;
+				complete(&transfer->done);
+			}
 
-		update_cq_doorbell(queue);
+			update_cq_doorbell(queue);
+		} while (!ret);
+
 		ring_cq_doorbell(queue);
+
 	}
 
 	return 0;
@@ -493,6 +502,9 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 
 	spin_lock_init(&io_queue->common.sq_lock);
 	INIT_LIST_HEAD(&io_queue->common.sq_list);
+	init_swait_queue_head(&io_queue->common.sq_wait);
+	init_swait_queue_head(&io_queue->common.cq_wait);
+	atomic_set(&io_queue->common.wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(submit_handler, io_queue, "mx_submit_thd%d", mx_pdev->dev_id);
 	mx_pdev->complete_thread = kthread_run(complete_handler, io_queue, "mx_complete_thd%d", mx_pdev->dev_id);
