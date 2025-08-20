@@ -242,7 +242,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
 	uint64_t *desc;
-	int total_desc_cnt;
+	int total_desc_cnt, backup;
 	int list_cnt, list_idx, desc_idx;
 	int i;
 	int ret;
@@ -258,10 +258,12 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	/* Get num of desc list will be desc count of last list */
 	list_cnt = 1;
+	backup = total_desc_cnt;
 	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
 		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
 		list_cnt++;
 	}
+	total_desc_cnt = backup;
 
 	ret = desc_list_alloc(dev, transfer, list_cnt);
 	if (ret) {
@@ -287,18 +289,17 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 		}
 
 		while (dma_size > 0) {
-			if (desc_idx == NUM_OF_DESC_PER_LIST - 1) {
-				if (sg_next(sg) || dma_size > SINGLE_DMA_SIZE) {
-					desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
-					desc = (uint64_t *)transfer->desc_list_va[list_idx];
-					desc_idx = 0;
-				}
+			if (desc_idx == NUM_OF_DESC_PER_LIST - 1 && total_desc_cnt > 1) {
+				desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
+				desc = (uint64_t *)transfer->desc_list_va[list_idx];
+				desc_idx = 0;
 			}
 
 			desc[desc_idx++] = dma_addr;
 			dma_addr += len;
 			dma_size -= len;
 			len = min_t(ssize_t, dma_size, SINGLE_DMA_SIZE);
+			total_desc_cnt--;
 		}
 	}
 
