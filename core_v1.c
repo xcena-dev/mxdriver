@@ -237,18 +237,13 @@ static int complete_handler(void *arg)
 #define SINGLE_DMA_SIZE		(1 << 10)
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+static int get_total_desc_count(struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
-	uint64_t *desc;
-	int total_desc_cnt, backup;
-	int list_cnt, list_idx, desc_idx;
+	int total_desc_cnt = 0;
 	int i;
-	int ret;
 
-	/* Get num of total desc count */
-	total_desc_cnt = 0;
 	for_each_sgtable_dma_sg(sgt, sg, i) {
 		int len = sg_dma_len(sg);
 		int desc_cnt = (len + SINGLE_DMA_SIZE - 1) / SINGLE_DMA_SIZE;
@@ -256,15 +251,32 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 		total_desc_cnt += desc_cnt;
 	}
 
-	/* Get num of desc list will be desc count of last list */
-	list_cnt = 1;
-	backup = total_desc_cnt;
+	return total_desc_cnt;
+}
+
+static int get_list_count(int total_desc_cnt)
+{
+	int list_cnt = 1;
+
 	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
 		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
 		list_cnt++;
 	}
-	total_desc_cnt = backup;
 
+	return list_cnt;
+}
+
+static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+{
+	struct sg_table *sgt = &transfer->sgt;
+	struct scatterlist *sg = sgt->sgl;
+	uint64_t *desc;
+	int total_desc_cnt, list_cnt, list_idx, desc_idx;
+	int ret;
+	int i;
+
+	total_desc_cnt = get_total_desc_count(transfer);
+	list_cnt = get_list_count(total_desc_cnt);
 	ret = desc_list_alloc(dev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);

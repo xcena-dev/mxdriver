@@ -210,23 +210,29 @@ static int complete_handler(void *arg)
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
+static int get_list_count(int pages_nr)
+{
+	int list_cnt = 1;
+	int total_desc_cnt = pages_nr - 1;
+
+	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
+		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
+		list_cnt++;
+	}
+
+	return list_cnt;
+}
+
 static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg;
 	uint64_t *desc;
-	int total_desc_cnt;
 	int list_cnt, list_idx, desc_idx;
-	int i;
 	int ret;
+	int i;
 
-	/* Get num of desc list will be desc count of last list */
-	list_cnt = 1;
-	total_desc_cnt = transfer->pages_nr - 1;
-	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
-		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
-		list_cnt++;
-	}
+	list_cnt = get_list_count(transfer->pages_nr);
 	ret = desc_list_alloc(dev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
