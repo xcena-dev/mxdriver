@@ -10,48 +10,25 @@ module_param(parallel_count, int, 0644);
 /******************************************************************************/
 /* Functions for DMA                                                          */
 /******************************************************************************/
-static ssize_t sg_set_pages(struct scatterlist *sg, struct page **pages, int pages_nr,
-		ssize_t size, void __user *user_addr)
-{
-	struct page *page;
-	unsigned int offset, nbytes;
-	int i;
-
-	for (i = 0; i < pages_nr; i++) {
-		page = pages[i];
-		offset = offset_in_page(user_addr);
-		nbytes = min_t(unsigned int, PAGE_SIZE - offset, size);
-
-		flush_dcache_page(page);
-		sg_set_page(sg, page, nbytes, offset);
-
-		user_addr += nbytes;
-		size -= nbytes;
-		sg = sg_next(sg);
-	}
-
-	return size;
-}
-
 static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
-	struct page *page;
 	int i;
 
 	if (sgt->nents)
-		dma_unmap_sg(dev, sgt->sgl, sgt->orig_nents, transfer->dir);
+		dma_unmap_sg(dev, sgt->sgl, sgt->nents, transfer->dir);
 
-	for (i = 0; i < transfer->pages_nr; i++) {
-		page = transfer->pages[i];
-		if (!page)
-			break;
-
-		if (transfer->dir == DMA_FROM_DEVICE)
+	if (transfer->dir == DMA_FROM_DEVICE) {
+		for (i = 0; i < transfer->pages_nr; i++) {
+			struct page *page = transfer->pages[i];
+			if (!page)
+				break;
 			set_page_dirty_lock(page);
-
-		put_page(page);
+		}
 	}
+
+	if (transfer->pages_nr > 0)
+		unpin_user_pages(transfer->pages, transfer->pages_nr);
 
 	sg_free_table(&transfer->sgt);
 
@@ -66,11 +43,14 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	struct sg_table *sgt = &transfer->sgt;
 	void __user *user_addr = transfer->user_addr;
 	size_t size = transfer->size;
-	int pages_nr;
+	unsigned int pages_nr;
+	unsigned int offset;
+	unsigned int gup_flags = 0;
+	long pinned;
 	int ret;
 
-	/* Calculate pages_nr and alloc pages as pages_nr*/
-	pages_nr = (offset_in_page(user_addr) + size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	offset = offset_in_page((unsigned long)user_addr);
+	pages_nr = DIV_ROUND_UP(offset + size, PAGE_SIZE);
 	if (!pages_nr)
 		return 0;
 
@@ -81,31 +61,36 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	}
 
 	/* Pin user_addr to pages */
-	transfer->pages_nr = get_user_pages_fast((unsigned long)user_addr, pages_nr,
-			FOLL_WRITE, transfer->pages);
-	if (transfer->pages_nr < pages_nr) {
-		pr_warn("Failed to get_user_pages_fast (request=%d, success=%d)\n",
-				pages_nr, transfer->pages_nr);
+	if (transfer->dir == DMA_FROM_DEVICE || transfer->dir == DMA_BIDIRECTIONAL)
+		gup_flags |= FOLL_WRITE;
+
+	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, transfer->pages);
+	if (pinned < 0) {
+		pr_warn("pin_user_pages_fast failed (err=%ld)\n", pinned);
+		return (int)pinned;
+	}
+	if (pinned != pages_nr) {
+		pr_warn("pin_user_pages_fast partial (req=%u, got=%ld)\n", pages_nr, pinned);
+		if (pinned > 0)
+			unpin_user_pages(transfer->pages, pinned);
 		return -EFAULT;
 	}
+	transfer->pages_nr = pages_nr;
 
 	/* Alloc sg_table as pages_nr */
-	ret = sg_alloc_table(sgt, pages_nr, GFP_KERNEL);
+	ret = sg_alloc_table_from_pages(sgt, transfer->pages, pages_nr, offset, size, GFP_KERNEL);
 	if (ret) {
-		pr_warn("Failed to sg_alloc_table (err=%d)\n", ret);
+		pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
+		unpin_user_pages(transfer->pages, transfer->pages_nr);
+		transfer->pages_nr = 0;
 		return ret;
-	}
-
-	/* Set pinned page to SG entried */
-	size = sg_set_pages(sgt->sgl, transfer->pages, pages_nr, size, user_addr);
-	if (size) {
-		pr_warn("Failed to sg_set_pages\n");
-		return -EINVAL;
 	}
 
 	/* Map the given buffer for DMA */
 	sgt->nents = dma_map_sg(dev, sgt->sgl, sgt->orig_nents, transfer->dir);
 	if (!sgt->nents) {
+		sg_free_table(sgt);
+		unpin_user_pages(transfer->pages, transfer->pages_nr);
 		pr_warn("Failed to dma_map_sg\n");
 		return -EIO;
 	}
