@@ -66,39 +66,23 @@ struct mx_completion
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
-static bool is_sqe_full(struct mx_queue_v2 *queue)
+static bool is_pushable(struct mx_queue_v2 *queue)
 {
-       return (queue->sq_tail + 1) % queue->depth == queue->sq_head;
+       return (queue->sq_tail + 1) % queue->depth != queue->sq_head;
 }
 
-static bool is_cqe_pending(struct mx_queue_v2 *queue)
+static bool is_popable(struct mx_queue_v2 *queue)
 {
-	struct mx_completion *cqe = &queue->cqes[queue->cq_head];
-	uint16_t status = le16_to_cpu(READ_ONCE(cqe->status));
-	uint16_t phase = (status >> 15) & 1;
+	struct mx_completion *cqe;
+	uint16_t status, phase;
 
+	if (atomic_read(&queue->common.wait_count) <= 0)
+		return false;
+
+	cqe = &queue->cqes[queue->cq_head];
+	status = le16_to_cpu(READ_ONCE(cqe->status));
+	phase = (status >> 15) & 1;
 	return phase == queue->cq_phase;
-}
-
-static int push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
-{
-	if (is_sqe_full(queue))
-		return -EAGAIN;
-
-	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
-
-	return 0;
-}
-
-static int pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
-{
-	if (!is_cqe_pending(queue))
-		return -EAGAIN;
-
-	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
-	queue->sq_head = cmpl->sq_head;
-
-	return 0;
 }
 
 static void update_sq_doorbell(struct mx_queue_v2 *queue)
@@ -114,12 +98,26 @@ static void update_sq_doorbell(struct mx_queue_v2 *queue)
 static void update_cq_doorbell(struct mx_queue_v2 *queue)
 {
 	uint32_t next_head = queue->cq_head + 1;
+
 	if (next_head == queue->depth) {
 		queue->cq_head = 0;
 		queue->cq_phase ^= 1;
 	} else {
 		queue->cq_head = next_head;
 	}
+}
+
+static void push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
+{
+	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+	update_sq_doorbell(queue);
+}
+
+static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
+{
+	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	queue->sq_head = cmpl->sq_head;
+	update_cq_doorbell(queue);
 }
 
 static void ring_sq_doorbell(struct mx_queue_v2 *queue)
@@ -152,8 +150,10 @@ static int submit_handler(void *arg)
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
+			if (!is_pushable(queue))
+				break;
+
 			push_mx_command(queue, transfer->command);
-			update_sq_doorbell(queue);
 			list_del(&transfer->entry);
 
 			if (transfer->nowait) {
@@ -176,29 +176,25 @@ static int complete_handler(void *arg)
 	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
 	struct mx_transfer *transfer;
 	struct mx_completion cmpl;
-	int ret;
 
 	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.cq_wait,
 				atomic_read(&queue->common.wait_count) > 0,
 				POLLING_INTERVAL_MSEC);
 
-		if (atomic_read(&queue->common.wait_count) <= 0)
-			continue;
+		while (is_popable(queue)) {
+			pop_mx_completion(queue, &cmpl);
+			atomic_dec(&queue->common.wait_count);
 
-		do {
-			ret = pop_mx_completion(queue, &cmpl);
 			transfer = find_transfer_by_id(cmpl.command_id);
-			if (transfer && !transfer->nowait) {
-				transfer->result = cmpl.result;
-				complete(&transfer->done);
-			}
+			if (!transfer || transfer->nowait)
+				continue;
 
-			update_cq_doorbell(queue);
-		} while (!ret);
+			transfer->result = cmpl.result;
+			complete(&transfer->done);
+		}
 
 		ring_cq_doorbell(queue);
-
 	}
 
 	return 0;
@@ -433,26 +429,30 @@ static int release_admin_queue(struct mx_pci_dev *mx_pdev)
 static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
 	struct mx_completion cmpl;
-	int ret;
+	int timeout = 500;
+	int count = 0;
 
-	ret = push_mx_command(queue, c);
-	if (ret)
-		return ret;
-
-	update_sq_doorbell(queue);
+	for (count = 0; count < timeout; count++) {
+		if (is_pushable(queue))
+			break;
+		msleep(1);
+	}
+	push_mx_command(queue, c);
 	ring_sq_doorbell(queue);
+	atomic_inc(&queue->common.wait_count);
 
-	do {
-		ret = pop_mx_completion(queue, &cmpl);
-	} while (ret);
-
-	update_cq_doorbell(queue);
+	for (count = 0; count < timeout; count++) {
+		if (is_popable(queue))
+			break;
+		msleep(1);
+	}
+	pop_mx_completion(queue, &cmpl);
 	ring_cq_doorbell(queue);
 
 	if (result)
 		*result = cmpl.result;
 
-	return 0;
+	return count < timeout;
 }
 
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
@@ -463,7 +463,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
-	int ret;
+	bool ret;
 
 	pr_info("Configuring IO queue...\n");
 
@@ -474,26 +474,22 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, &result);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to create IO completion queue (err=%d)\n", ret);
+	ret = submit_sync_command(admin_queue, &comm, &result);
+	if (!ret) {
+		pr_err("Failed to create IO completion queue\n");
 		release_queue(dev, io_queue);
-		return ret;
+		return -EIO;
 	}
 	cq_id = le16_to_cpu(result);
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, &result);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to create IO submission queue (err=%d)\n", ret);
+	ret = submit_sync_command(admin_queue, &comm, &result);
+	if (!ret) {
+		pr_err("Failed to create IO submission queue\n");
 		release_queue(dev, io_queue);
-		return ret;
+		return -EIO;
 	}
 	sq_id = le16_to_cpu(result);
 

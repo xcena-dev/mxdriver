@@ -177,7 +177,7 @@ static int submit_handler(void *arg)
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 
-	while (kthread_should_stop() == false) {
+	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.sq_wait,
 				!list_empty(&queue->common.sq_list),
 				POLLING_INTERVAL_MSEC);
@@ -210,7 +210,7 @@ static int complete_handler(void *arg)
 	struct mx_transfer *transfer;
 	struct mx_command comm;
 
-	while (kthread_should_stop() == false) {
+	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.cq_wait,
 				atomic_read(&queue->common.wait_count) > 0,
 				POLLING_INTERVAL_MSEC);
@@ -220,7 +220,7 @@ static int complete_handler(void *arg)
 			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(comm.id);
-			if (!transfer)
+			if (!transfer || transfer->nowait)
 				continue;
 
 			transfer->result = comm.host_addr;
