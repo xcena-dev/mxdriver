@@ -233,45 +233,22 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
 	struct mx_event *mx_event;
-	unsigned int mask = 0;
-	int count;
+	int ret;
 
-	mx_cdev = (struct mx_char_dev *)file->private_data;
-	if (!mx_cdev) {
-		pr_warn("mx_cdev is NULL of file(0x%p)\n", file);
+	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	if (ret)
 		return POLLERR;
-	}
-
-	if (mx_cdev->magic != MAGIC_CHAR) {
-		pr_warn("magic is mismatch. mx_cdev(0x%p) file(0x%p)\n", mx_cdev, file);
-		return POLLERR;
-	}
-
-	mx_pdev = mx_cdev->mx_pdev;
-	if (!mx_pdev) {
-		pr_warn("mx_pdev is NULL of file(0x%p)\n", file);
-		return POLLERR;
-	}
-
-	if (mx_pdev->magic != MAGIC_DEVICE) {
-		pr_warn("magic is mismatch. mx_pdev(0x%p) file(0x%p)\n", mx_pdev, file);
-		return POLLERR;
-	}
-
-	if (!mx_pdev->enabled) {
-		pr_warn("pci device isn't enabled. dev_no=%d", mx_pdev->dev_no);
-		return POLLERR;
-	}
 
 	mx_event = &mx_pdev->event;
 	poll_wait(file, &mx_event->wq, wait);
-	count = atomic_read(&mx_event->count);
-	if (count > 0) {
+
+	ret = atomic_read(&mx_event->count);
+	if (ret > 0) {
 		atomic_dec(&mx_event->count);
-		mask = POLLIN | POLLRDNORM;
+		return POLLIN | POLLRDNORM;
 	}
 
-	return mask;
+	return 0;
 }
 
 struct file_operations mxdma_fops_data = {
