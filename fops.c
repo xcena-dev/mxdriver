@@ -228,6 +228,19 @@ static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, 
 	return write_ctrl_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CQ_WRITE, mx_cdev->nowait);
 }
 
+static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct mx_char_dev *mx_cdev;
+	struct mx_pci_dev *mx_pdev;
+	int ret;
+
+	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	if (ret)
+		return ret;
+
+	return ioctl_to_device(mx_pdev, cmd, arg);
+}
+
 static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 {
 	struct mx_char_dev *mx_cdev;
@@ -279,6 +292,12 @@ struct file_operations mxdma_fops_cq = {
 	.write = mxdma_device_write_cq,
 };
 
+struct file_operations mxdma_fops_ioctl = {
+	.open = mxdma_device_open,
+	.release = mxdma_device_release,
+	.unlocked_ioctl = mxdma_device_ioctl,
+};
+
 struct file_operations mxdma_fops_event = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -294,6 +313,7 @@ struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_CONTEXT_NOWAIT] = &mxdma_fops_context,
 	[MX_CDEV_SQ_NOWAIT] = &mxdma_fops_sq,
 	[MX_CDEV_CQ_NOWAIT] = &mxdma_fops_cq,
+	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,
 	[MX_CDEV_EVENT] = &mxdma_fops_event,
 };
 

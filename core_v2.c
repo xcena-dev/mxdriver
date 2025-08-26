@@ -322,15 +322,17 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 		return NULL;
 	}
 
-	if (transfer->dir == DMA_TO_DEVICE) {
-		uint64_t value = 0;
-		int ret = copy_from_user(&value, transfer->user_addr, transfer->size);
+	if (transfer->dir != DMA_TO_DEVICE)
+		return (void*)comm;
 
-		if (ret) {
-			pr_warn("Failed to copy_from_user (err=%d)\n", ret);
+	if (access_ok(transfer->user_addr, transfer->size)) {
+		if (copy_from_user(&comm->doorbell_value, transfer->user_addr, sizeof(uint64_t))) {
+			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
+					(uint64_t)&comm->doorbell_value, (uint64_t)transfer->user_addr);
 			return NULL;
 		}
-		comm->doorbell_value = value;
+	} else {
+		comm->doorbell_value = *(uint64_t *)transfer->user_addr;
 	}
 
 	return (void*)comm;

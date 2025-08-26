@@ -372,9 +372,14 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 	int ret = 0;
 
 	if (transfer->dir == DMA_FROM_DEVICE) {
-		ret = copy_to_user(transfer->user_addr, &transfer->result, transfer->size);
-		if (ret)
-			pr_warn("Failed to copy_to_user (err=%d)\n", ret);
+		if (access_ok(transfer->user_addr, transfer->size)) {
+			ret = copy_to_user(transfer->user_addr, &transfer->result, sizeof(uint64_t));
+			if (ret)
+				pr_warn("Failed to copy_to_user (%llx -> %llx)\n",
+						(uint64_t)&transfer->result, (uint64_t)transfer->user_addr);
+		} else {
+			*(uint64_t *)transfer->user_addr = transfer->result;
+		}
 	}
 
 	release_mx_transfer(transfer);
