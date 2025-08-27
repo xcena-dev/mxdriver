@@ -156,12 +156,8 @@ static int submit_handler(void *arg)
 			push_mx_command(queue, transfer->command);
 			list_del(&transfer->entry);
 
-			if (transfer->nowait) {
-				complete(&transfer->done);
-			} else {
-				atomic_inc(&queue->common.wait_count);
-				swake_up_one(&queue->common.cq_wait);
-			}
+			atomic_inc(&queue->common.wait_count);
+			swake_up_one(&queue->common.cq_wait);
 		}
 		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 
@@ -187,7 +183,7 @@ static int complete_handler(void *arg)
 			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(cmpl.command_id);
-			if (!transfer || transfer->nowait)
+			if (!transfer)
 				continue;
 
 			transfer->result = cmpl.result;

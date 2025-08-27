@@ -148,7 +148,7 @@ fail:
 }
 
 static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
-		enum dma_data_direction dir, bool nowait)
+		enum dma_data_direction dir)
 {
 	struct mx_transfer *transfer;
 
@@ -166,13 +166,12 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 	transfer->size = size;
 	transfer->device_addr = device_addr;
 	transfer->dir = dir;
-	transfer->nowait = nowait;
 
 	return transfer;
 }
 
 static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t total_size,
-		uint64_t device_addr, enum dma_data_direction dir, int pages_nr, int count, bool nowait)
+		uint64_t device_addr, enum dma_data_direction dir, int pages_nr, int count)
 {
 	struct mx_transfer **transfer;
 	int q, r;
@@ -192,7 +191,7 @@ static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t to
 		uint64_t end_addr = ((uint64_t)user_addr + num * PAGE_SIZE) & PAGE_MASK;
 		size_t size = min_t(size_t, end_addr - (uint64_t)user_addr, total_size);
 
-		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir, nowait);
+		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir);
 		user_addr = (void __user *)((uint64_t)user_addr + size);
 		total_size -= size;
 		device_addr += size;
@@ -201,24 +200,11 @@ static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t to
 	return transfer;
 }
 
-static void release_mx_transfer(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+static void release_mx_transfer(struct mx_transfer *transfer)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
-
 	transfer_id_free(transfer->id);
-	desc_list_free(dev, transfer);
 	kfree(transfer->command);
 	kfree(transfer);
-}
-
-static void release_mx_transfers(struct mx_pci_dev *mx_pdev, struct mx_transfer **transfers, int count)
-{
-	int i;
-
-	for (i = 0; i < count; i++)
-		release_mx_transfer(mx_pdev, transfers[i]);
-
-	kfree(transfers);
 }
 
 static void mx_transfer_queue(struct mx_queue *queue, struct mx_transfer *transfer)
@@ -264,6 +250,7 @@ static int mx_transfer_wait(struct mx_queue *queue, struct mx_transfer *transfer
 	return 0;
 }
 
+static void mx_transfer_wait_and_destroy_sg(struct work_struct *work);
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
@@ -278,9 +265,11 @@ static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 	transfer->command = mx_pdev->ops.create_command_sg(dev, transfer, opcode);
 	if (!transfer->command) {
 		pr_warn("Failed to create_command_sg\n");
-		unmap_user_addr_to_sg(dev, transfer);
 		return -ENOMEM;
 	}
+
+	transfer->mx_pdev = mx_pdev;
+	INIT_WORK(&transfer->work, mx_transfer_wait_and_destroy_sg);
 
 	return 0;
 }
@@ -290,35 +279,47 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 	struct device *dev = &mx_pdev->pdev->dev;
 
 	unmap_user_addr_to_sg(dev, transfer);
+	desc_list_free(dev, transfer);
+	release_mx_transfer(transfer);
 }
 
-static int mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
-		struct mx_transfer *transfer, int opcode)
+static void mx_transfer_wait_and_destroy_sg(struct work_struct *work)
 {
+	struct mx_transfer *transfer = container_of(work, struct mx_transfer, work);
+	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
 	int ret;
-
-	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
-	if (ret < 0) {
-		pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
-		goto out;
-	}
-
-	mx_transfer_queue(mx_pdev->io_queue, transfer);
 
 	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
 	if (ret < 0)
 		pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
 
 	mx_transfer_destroy_sg(mx_pdev, transfer);
+}
 
-out:
-	release_mx_transfer(mx_pdev, transfer);
+static int mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
+		struct mx_transfer *transfer, int opcode, bool nowait)
+{
+	int ret;
+
+	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
+	if (ret < 0) {
+		pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
+		mx_transfer_destroy_sg(mx_pdev, transfer);
+		return ret;
+	}
+
+	mx_transfer_queue(mx_pdev->io_queue, transfer);
+
+	if (nowait)
+		schedule_work(&transfer->work);
+	else
+		mx_transfer_wait_and_destroy_sg(&transfer->work);
 
 	return ret;
 }
 
 static int mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
-		struct mx_transfer **transfers, int opcode, int count)
+		struct mx_transfer **transfers, int opcode, int count, bool nowait)
 {
 	int ret;
 	int i;
@@ -327,29 +328,33 @@ static int mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		ret = mx_transfer_init_sg(mx_pdev, transfers[i], opcode);
 		if (ret < 0) {
 			pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
-			goto out;
+			break;
 		}
+	}
+
+	if (ret < 0) {
+		for (i = 0; i < count; i++)
+			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
+		return ret;
 	}
 
 	mx_transfer_queue_parallel(mx_pdev->io_queue, transfers, count);
 
 	for (i = 0; i < count; i++) {
-		ret = mx_transfer_wait(mx_pdev->io_queue, transfers[i]);
-		if (ret < 0) {
-			pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
-			break;
-		}
+		struct mx_transfer *transfer = transfers[i];
+
+		if (nowait)
+			schedule_work(&transfer->work);
+		else
+			mx_transfer_wait_and_destroy_sg(&transfer->work);
 	}
 
-out:
-	for (i = 0; i < count; i++)
-		mx_transfer_destroy_sg(mx_pdev, transfers[i]);
-
-	release_mx_transfers(mx_pdev, transfers, count);
+	kfree(transfers);
 
 	return ret;
 }
 
+static void mx_transfer_wait_and_destroy_ctrl(struct work_struct *work);
 static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_ctrl(transfer, opcode);
@@ -358,50 +363,63 @@ static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer 
 		return -ENOMEM;
 	}
 
+	transfer->mx_pdev = mx_pdev;
+	INIT_WORK(&transfer->work, mx_transfer_wait_and_destroy_ctrl);
+
 	return 0;
 }
 
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 {
-	int ret;
+	int ret = 0;
 
-	if (transfer->dir != DMA_FROM_DEVICE)
-		return 0;
+	if (transfer->dir == DMA_FROM_DEVICE) {
+		ret = copy_to_user(transfer->user_addr, &transfer->result, transfer->size);
+		if (ret)
+			pr_warn("Failed to copy_to_user (err=%d)\n", ret);
+	}
 
-	ret = copy_to_user(transfer->user_addr, &transfer->result, transfer->size);
-	if (ret)
-		pr_warn("Failed to copy_to_user (err=%d)\n", ret);
+	release_mx_transfer(transfer);
 
 	return ret;
 }
 
+static void mx_transfer_wait_and_destroy_ctrl(struct work_struct *work)
+{
+	struct mx_transfer *transfer = container_of(work, struct mx_transfer, work);
+	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
+	int ret;
+
+	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
+	if (ret < 0) {
+		pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
+		return;
+	}
+
+	ret = mx_transfer_destroy_ctrl(transfer);
+	if (ret) {
+		pr_warn("Failed to destroy mx_transfer (err=%d)\n", ret);
+		return;
+	}
+}
+
 static int mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
-		struct mx_transfer *transfer, int opcode)
+		struct mx_transfer *transfer, int opcode, bool nowait)
 {
 	int ret;
 
 	ret = mx_transfer_init_ctrl(mx_pdev, transfer, opcode);
 	if (ret < 0) {
 		pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
-		goto out;
+		return ret;
 	}
 
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 
-	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
-	if (ret < 0) {
-		pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
-		goto out;
-	}
-
-	ret = mx_transfer_destroy_ctrl(transfer);
-	if (ret) {
-		pr_warn("Failed to destroy mx_transfer (err=%d)\n", ret);
-		goto out;
-	}
-
-out:
-	release_mx_transfer(mx_pdev, transfer);
+	if (nowait)
+		schedule_work(&transfer->work);
+	else
+		mx_transfer_wait_and_destroy_ctrl(&transfer->work);
 
 	return ret;
 }
@@ -415,13 +433,13 @@ ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer *transfer;
 	int ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, false);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode);
+	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
 	if (ret) {
 		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
 		return ret;
@@ -436,13 +454,13 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer *transfer;
 	int ret;
 
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE, nowait);
+	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode);
+	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode, nowait);
 	if (ret) {
 		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
 		return ret;
@@ -467,11 +485,11 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 	if (count == 1)
 		return read_data_from_device(mx_pdev, buf, size, fpos, opcode);
 
-	transfers = alloc_mx_transfers(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count, false);
+	transfers = alloc_mx_transfers(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count);
 	if (!transfers)
 		return -ENOMEM;
 
-	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count);
+	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, false);
 	if (ret) {
 		pr_warn("Failed to submit parallel transfers (err=%d)\n", ret);
 		return ret;
@@ -496,11 +514,11 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 	if (count == 1)
 		return write_data_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
 
-	transfers = alloc_mx_transfers((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count, nowait);
+	transfers = alloc_mx_transfers((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count);
 	if (!transfers)
 		return -ENOMEM;
 
-	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count);
+	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
 	if (ret) {
 		pr_warn("Failed to submit parallel transfers (err=%d)\n", ret);
 		return ret;
@@ -515,13 +533,13 @@ ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer *transfer;
 	int ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, false);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode);
+	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, false);
 	if (ret) {
 		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
 		return ret;
@@ -536,13 +554,13 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer *transfer;
 	int ret;
 
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE, nowait);
+	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode);
+	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, nowait);
 	if (ret) {
 		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
 		return ret;

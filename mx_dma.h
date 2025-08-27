@@ -87,7 +87,9 @@ struct mx_transfer {
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
-	bool nowait;
+
+	struct mx_pci_dev *mx_pdev;
+	struct work_struct work;
 
 	void *command;
 	struct list_head entry;

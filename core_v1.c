@@ -190,12 +190,8 @@ static int submit_handler(void *arg)
 			push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
 			list_del(&transfer->entry);
 
-			if (transfer->nowait) {
-				complete(&transfer->done);
-			} else {
-				atomic_inc(&queue->common.wait_count);
-				swake_up_one(&queue->common.cq_wait);
-			}
+			atomic_inc(&queue->common.wait_count);
+			swake_up_one(&queue->common.cq_wait);
 		}
 		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 	}
@@ -220,7 +216,7 @@ static int complete_handler(void *arg)
 			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(comm.id);
-			if (!transfer || transfer->nowait)
+			if (!transfer)
 				continue;
 
 			transfer->result = comm.host_addr;
@@ -330,7 +326,6 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 	comm->magic = MAGIC_COMMAND;
 	comm->id = transfer->id;
 	comm->opcode = opcode;
-	comm->nowait = transfer->nowait ? 1 : 0;
 	comm->size = transfer->size;
 	comm->device_addr = transfer->device_addr;
 
