@@ -215,7 +215,7 @@ static int get_list_count(int pages_nr)
 	return list_cnt;
 }
 
-static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg;
@@ -225,7 +225,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 	int i;
 
 	list_cnt = get_list_count(transfer->pages_nr);
-	ret = desc_list_alloc(dev, transfer, list_cnt);
+	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
 		return 0;
@@ -272,7 +272,7 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 	return comm;
 }
 
-static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transfer, int opcode)
+static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
 	struct sg_table *sgt = &transfer->sgt;
@@ -301,7 +301,7 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 			return NULL;
 		}
 	} else {
-		comm->prp_entry2 = desc_list_init(dev, transfer);
+		comm->prp_entry2 = desc_list_init(mx_pdev, transfer);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
 			kfree(comm);
@@ -342,34 +342,16 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q_depth)
 {
 	queue->depth = q_depth;
-	queue->cqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
+	queue->cqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
 	if (!queue->cqes)
 		return -ENOMEM;
 
-	queue->sqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
+	queue->sqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
 	if (!queue->sqes)
-		dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
+		return -ENOMEM;
 
 	pr_info("Allocated queue (depth=%u, sq_dma_addr=0x%llx, cq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
 			queue->depth, queue->sq_dma_addr, queue->cq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
-
-	return 0;
-}
-
-static int release_queue(struct device *dev, struct mx_queue_v2 *queue)
-{
-	if (!queue->cqes || !queue->sqes)
-		return -EINVAL;
-
-	dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
-	dma_free_coherent(dev, queue->depth * sizeof(struct mx_command), (void *)queue->sqes, queue->sq_dma_addr);
-
-	queue->cqes = NULL;
-	queue->sqes = NULL;
-	queue->cq_dma_addr = 0;
-	queue->sq_dma_addr = 0;
-
-	kfree(queue);
 
 	return 0;
 }
@@ -392,7 +374,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
-	struct mx_queue_v2 *queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
 	uint32_t aqa;
 	int ret;
 
@@ -415,11 +397,6 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	mx_pdev->admin_queue = (struct mx_queue *)queue;
 
 	return 0;
-}
-
-static int release_admin_queue(struct mx_pci_dev *mx_pdev)
-{
-	return release_queue(&mx_pdev->pdev->dev, (struct mx_queue_v2 *)mx_pdev->admin_queue);
 }
 
 static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
@@ -455,7 +432,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
-	struct mx_queue_v2 *io_queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *io_queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
@@ -473,7 +450,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	ret = submit_sync_command(admin_queue, &comm, &result);
 	if (!ret) {
 		pr_err("Failed to create IO completion queue\n");
-		release_queue(dev, io_queue);
 		return -EIO;
 	}
 	cq_id = le16_to_cpu(result);
@@ -484,7 +460,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	ret = submit_sync_command(admin_queue, &comm, &result);
 	if (!ret) {
 		pr_err("Failed to create IO submission queue\n");
-		release_queue(dev, io_queue);
 		return -EIO;
 	}
 	sq_id = le16_to_cpu(result);
@@ -514,7 +489,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 
 static int release_io_queue(struct mx_pci_dev *mx_pdev)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
 	struct mx_command comm = {};
@@ -539,10 +513,6 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to delete IO submission queue (err=%d)\n", ret);
 		return ret;
 	}
-
-	ret = release_queue(dev, io_queue);
-	if (ret)
-		pr_err("Failed to release IO queue (err=%d)\n", ret);
 
 	if (mx_pdev->submit_thread) {
 		ret = kthread_stop(mx_pdev->submit_thread);
@@ -574,7 +544,6 @@ static int init_mx_queue(struct mx_pci_dev *mx_pdev)
 	ret = configure_io_queue(mx_pdev);
 	if (ret) {
 		pr_err("Failed to configure IO queue (err=%d)\n", ret);
-		release_admin_queue(mx_pdev);
 		return ret;
 	}
 
@@ -589,12 +558,6 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	ret = release_io_queue(mx_pdev);
 	if (ret) {
 		pr_err("Failed to release IO queue (err=%d)\n", ret);
-		return ret;
-	}
-
-	ret = release_admin_queue(mx_pdev);
-	if (ret) {
-		pr_err("Failed to release admin queue (err=%d)\n", ret);
 		return ret;
 	}
 

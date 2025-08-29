@@ -33,7 +33,7 @@ static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transf
 	sg_free_table(&transfer->sgt);
 
 	if (transfer->pages) {
-		devm_kfree(dev, transfer->pages);
+		kfree(transfer->pages);
 		transfer->pages = NULL;
 	}
 }
@@ -54,7 +54,7 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	if (!pages_nr)
 		return 0;
 
-	transfer->pages = devm_kcalloc(dev, pages_nr, sizeof(struct page *), GFP_KERNEL);
+	transfer->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
 	if (!transfer->pages) {
 		pr_warn("Failed to alloc pages\n");
 		return -ENOMEM;
@@ -101,9 +101,8 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 /******************************************************************************/
 /* MX Transfer                                                                */
 /******************************************************************************/
-static void desc_list_free(struct device *dev, struct mx_transfer *transfer)
+static void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
-	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
 	int i;
 
 	for (i = 0; i < transfer->desc_list_cnt; i++) {
@@ -112,19 +111,18 @@ static void desc_list_free(struct device *dev, struct mx_transfer *transfer)
 	}
 
 	if (transfer->desc_list_va)
-		devm_kfree(dev, transfer->desc_list_va);
+		kfree(transfer->desc_list_va);
 	if (transfer->desc_list_ba)
-		devm_kfree(dev, transfer->desc_list_ba);
+		kfree(transfer->desc_list_ba);
 }
 
-int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_cnt)
+int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt)
 {
-	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
 	int i;
 
 	transfer->desc_list_cnt = list_cnt;
-	transfer->desc_list_va = devm_kcalloc(dev, list_cnt, sizeof(void *), GFP_KERNEL);
-	transfer->desc_list_ba = devm_kcalloc(dev, list_cnt, sizeof(dma_addr_t), GFP_KERNEL);
+	transfer->desc_list_va = kcalloc(list_cnt, sizeof(void *), GFP_KERNEL);
+	transfer->desc_list_ba = kcalloc(list_cnt, sizeof(dma_addr_t), GFP_KERNEL);
 
 	for (i = 0; i < list_cnt; i++) {
 		void *cpu_addr;
@@ -141,7 +139,7 @@ int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_c
 	return 0;
 
 fail:
-	desc_list_free(dev, transfer);
+	desc_list_free(mx_pdev, transfer);
 	pr_warn("Failed to dma_alloc_coherent\n");
 
 	return -ENOMEM;
@@ -262,7 +260,7 @@ static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 		return ret;
 	}
 
-	transfer->command = mx_pdev->ops.create_command_sg(dev, transfer, opcode);
+	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
 	if (!transfer->command) {
 		pr_warn("Failed to create_command_sg\n");
 		return -ENOMEM;
@@ -279,7 +277,7 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 	struct device *dev = &mx_pdev->pdev->dev;
 
 	unmap_user_addr_to_sg(dev, transfer);
-	desc_list_free(dev, transfer);
+	desc_list_free(mx_pdev, transfer);
 	release_mx_transfer(transfer);
 }
 

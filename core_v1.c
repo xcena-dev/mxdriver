@@ -262,7 +262,7 @@ static int get_list_count(int total_desc_cnt)
 	return list_cnt;
 }
 
-static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
@@ -273,7 +273,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	total_desc_cnt = get_total_desc_count(transfer);
 	list_cnt = get_list_count(total_desc_cnt);
-	ret = desc_list_alloc(dev, transfer, list_cnt);
+	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
 		return 0;
@@ -332,7 +332,7 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 	return comm;
 }
 
-static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transfer, int opcode)
+static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
 	struct sg_table *sgt = &transfer->sgt;
@@ -358,7 +358,7 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 		}
 	} else {
 		comm->page_mode = MXDMA_PAGE_MODE_MULTI;
-		comm->prp_entry1 = desc_list_init(dev, transfer);
+		comm->prp_entry1 = desc_list_init(mx_pdev, transfer);
 		if (!comm->prp_entry1) {
 			pr_warn("Failed to get desc_list_init\n");
 			kfree(comm);
@@ -418,11 +418,13 @@ static int mx_mbox_init(struct mx_mbox *mbox, void __iomem *ctx_addr, void __iom
 #define HMBOX_RQ_OFFSET 0x1000
 static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 {
-	struct mx_queue_v1 *queue = kzalloc(sizeof(struct mx_queue_v1), GFP_KERNEL);
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue_v1 *queue;
 	void __iomem *host_mbox_base, *hifc_mbox_base;
-	uint64_t q_offset = HMBOX_HIO_QID * sizeof(uint64_t);
+	uint64_t q_offset;
 	int ret;
 
+	queue = devm_kzalloc(dev, sizeof(struct mx_queue_v1), GFP_KERNEL);
 	if (!queue) {
 		pr_err("Failed to allocate memory for mx_queue_v1\n");
 		return -ENOMEM;
@@ -432,6 +434,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	host_mbox_base = mx_pdev->bar;
 	hifc_mbox_base = host_mbox_base + (1 << 20);
+	q_offset = HMBOX_HIO_QID * sizeof(uint64_t);
 
 	ret = mx_mbox_init(&queue->sq_mbox, host_mbox_base + q_offset, hifc_mbox_base);
 	if (ret) {
@@ -474,8 +477,6 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
-
-	kfree(mx_pdev->io_queue);
 
 	return ret;
 }

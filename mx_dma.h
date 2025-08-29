@@ -131,7 +131,7 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
-	void * (*create_command_sg) (struct device *, struct mx_transfer *, int);
+	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 } __randomize_layout;
 
@@ -181,7 +181,7 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf,
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_cnt);
+int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
