@@ -57,10 +57,10 @@ struct mx_command {
 struct mx_completion
 {
 	uint64_t result;
-	uint16_t sq_id;
 	uint16_t sq_head;
-	uint16_t status;
+	uint16_t sq_id;
 	uint16_t command_id;
+	uint16_t status;
 } __packed;
 
 /******************************************************************************/
@@ -81,7 +81,7 @@ static bool is_popable(struct mx_queue_v2 *queue)
 
 	cqe = &queue->cqes[queue->cq_head];
 	status = le16_to_cpu(READ_ONCE(cqe->status));
-	phase = (status >> 15) & 1;
+	phase = status & 0x1;
 	return phase == queue->cq_phase;
 }
 
@@ -131,7 +131,7 @@ static void ring_sq_doorbell(struct mx_queue_v2 *queue)
 
 static void ring_cq_doorbell(struct mx_queue_v2 *queue)
 {
-	writel(queue->cq_head, queue->db + sizeof(uint64_t));
+	writel(queue->cq_head, queue->db + sizeof(uint32_t));
 }
 
 /******************************************************************************/
@@ -367,7 +367,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 	queue->sq_head = 0;
 	queue->cq_head = 0;
 	queue->cq_phase = 1;
-	queue->db = &dbs[qid * 2];
+	queue->db = &dbs[qid];
 	memset((void *)queue->cqes, 0, queue->depth * sizeof(struct mx_completion));
 	memset((void *)queue->sqes, 0, queue->depth * sizeof(struct mx_command));
 	wmb();
