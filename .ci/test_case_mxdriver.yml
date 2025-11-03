@@ -1,6 +1,6 @@
 - name: mxdriver_dma_cxl_6_10
   command:
-    - cd emulator && ./setup.sh --dev
+    - cd emulator && ./setup.sh --dev --clean
     - sudo ./run.sh --bg
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
@@ -14,7 +14,7 @@
 
 - name: mxdriver_dma_cxl_6_10_mx1s
   command:
-    - cd emulator && ./setup.sh --dev
+    - cd emulator && ./setup.sh --dev --clean
     - sudo ./run.sh --bg --backend mx1squarter
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
@@ -28,7 +28,7 @@
 
 - name: mxdriver_dma_cxl_5_15
   command:
-    - cd emulator && ./setup.sh --dev --config cfg/setup-5.15.conf
+    - cd emulator && ./setup.sh --dev --clean --config cfg/setup-5.15.conf
     - sudo ./run.sh --bg
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
