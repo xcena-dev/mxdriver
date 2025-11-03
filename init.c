@@ -316,6 +316,17 @@ out_fail:
 	return ret;
 }
 
+static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct pci_dev *pdev = to_pci_dev(data);
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block mxdma_pci_notifier = {
+	.notifier_call = mxdma_pci_notify,
+};
+
 int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id)
 {
 	int ret;
@@ -421,6 +432,7 @@ static int mxdma_init(void)
 #ifdef CONFIG_WO_CXL
 	return pci_register_driver(&pci_driver);
 #else
+	bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
 	return 0;
 #endif
 }
@@ -429,6 +441,8 @@ static void mxdma_exit(void)
 {
 #ifdef CONFIG_WO_CXL
 	pci_unregister_driver(&pci_driver);
+#else
+	bus_unregister_notifier(&pci_bus_type, &mxdma_pci_notifier);
 #endif
 
 	if (mxdma_class)
