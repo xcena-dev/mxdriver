@@ -320,6 +320,10 @@ int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int
 {
 	int ret;
 
+	if (pdev->vendor != XCENA_PCI_VENDOR_ID) {
+		return 0;
+	}
+
 	ret = create_mx_pdev(pdev, cxl_memdev_id);
 	if (ret) {
 		pr_err("Failed to create_mx_pdev\n");
@@ -346,7 +350,7 @@ EXPORT_SYMBOL(mxdma_driver_remove);
 /******************************************************************************/
 #ifdef CONFIG_WO_CXL
 static const struct pci_device_id pci_ids[] = {
-	{ PCI_DEVICE(0x20a6, PCI_ANY_ID), },
+	{ PCI_DEVICE(XCENA_PCI_VENDOR_ID, PCI_ANY_ID), },
 	{ 0,}
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
