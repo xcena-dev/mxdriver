@@ -341,7 +341,8 @@ void mxdma_driver_remove(struct pci_dev *pdev)
 {
 	destroy_mx_pdev(pdev);
 
-	pr_info("pci device is removed (vendor=%#x) device=%#x)\n", pdev->vendor, pdev->device);
+	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
+			pdev->vendor, pdev->device, dev_name(&pdev->dev));
 }
 EXPORT_SYMBOL(mxdma_driver_remove);
 
@@ -360,7 +361,7 @@ static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id
 	static int cxl_memdev_id = 0;
 	int ret;
 
-	ret = create_mx_pdev(pdev, cxl_memdev_id++);
+	ret = create_mx_pdev(pdev, cxl_memdev_id);
 	if (ret) {
 		pr_err("Failed to create_mx_pdev\n");
 		return ret;
@@ -369,6 +370,8 @@ static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id
 	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
 			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
 
+	cxl_memdev_id++;
+
 	return 0;
 }
 
@@ -376,7 +379,8 @@ static void __mxdma_driver_remove(struct pci_dev *pdev)
 {
 	destroy_mx_pdev(pdev);
 
-	pr_info("pci device is removed (vendor=%#x) device=%#x)\n", pdev->vendor, pdev->device);
+	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
+			pdev->vendor, pdev->device, dev_name(&pdev->dev));
 }
 
 static struct pci_driver pci_driver = {
