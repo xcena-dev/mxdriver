@@ -335,35 +335,40 @@ static const struct pci_device_id pci_ids[] = {
 MODULE_DEVICE_TABLE(pci, pci_ids);
 
 #ifndef CONFIG_WO_CXL
-static int find_cxl_memdev_id(struct device *dev, void *data)
+static int match_mem_prefix(struct device *dev, void *data)
 {
-	if (strncmp(dev_name(dev), MXDMA_MEM_NAME, MEM_NAME_LEN) == 0)
-	{
-		int *mem_id_ptr = (int *)data;
-		if (sscanf(dev_name(dev), MXDMA_MEM_NAME "%d", mem_id_ptr) == 1 && *mem_id_ptr >= 0) {
-			return 1; /* found */
-		}
-	}
+	const char *name;
 
-	return 0;
+	name = dev_name(dev);
+	return name && !strncmp(name, MXDMA_MEM_NAME, MEM_NAME_LEN);
 }
 #endif
 
 static int get_cxl_memdev_id(struct pci_dev *pdev)
 {
-	int mem_id = -1;
 #ifdef CONFIG_WO_CXL
 	static int standalone_id = -1;
 	return ++standalone_id;
 #else
+	int mem_id;
+	struct device *child;
 
-	device_for_each_child(&pdev->dev, &mem_id, find_cxl_memdev_id);
-	if (mem_id < 0)
+	child = device_find_child(&pdev->dev, NULL, match_mem_prefix);
+	if (!child)
 	{
-		pr_err("Could not find cxl_memdev child for BDF %s\n", dev_name(&pdev->dev));
+		pr_err("No matching CXL memory device found for PCI device %s.\n", dev_name(&pdev->dev));
+		return -ENODEV;
 	}
-#endif
+
+	if (sscanf(dev_name(child), MXDMA_MEM_NAME "%d", &mem_id) != 1 || mem_id < 0)
+	{
+		pr_err("Failed to parse CXL memory device ID from device name %s.\n", dev_name(child));
+		mem_id = -ENODEV;
+	}
+
+	put_device(child);
 	return mem_id;
+#endif
 }
 
 #ifndef CONFIG_WO_CXL
