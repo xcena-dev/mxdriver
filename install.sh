@@ -13,4 +13,5 @@ fi
 make $MAKEVAR clean
 make $MAKEVAR -j"$(nproc)" install
 
+echo mx_dma | tee /etc/modules-load.d/mx_dma.conf
 depmod -a
