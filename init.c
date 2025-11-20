@@ -46,12 +46,11 @@ out:
 
 static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 {
-#if 0
 	struct pci_dev *pdev = mx_pdev->pdev;
 	int irq = pci_irq_vector(pdev, 0);
 
 	free_irq(irq, mx_pdev);
-
+#ifdef CONFIG_WO_CXL
 	pci_disable_msi(pdev);
 #endif
 }
@@ -78,21 +77,29 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 	if (!pdev->is_busmaster)
 		pci_set_master(pdev);
 
-#if 0
+#ifdef CONFIG_WO_CXL
 	ret = pci_enable_msi(pdev);
 	if (ret) {
 		pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
-	} else {
-		int irq = pci_irq_vector(pdev, 0);
-		pr_info("MSI enabled, irq=%d\n", irq);
-
-		ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
-		if (ret) {
-			pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
-			pci_disable_msi(pdev);
-		}
+		return ret;
+	}
+#else
+	if (pci_msi_enabled() == false) {
+		pr_err("pci msi is disabled, cannot get irq vector\n");
+		return -ENODEV;
 	}
 #endif
+
+	int irq = pci_irq_vector(pdev, 0);
+	if (irq < 0) {
+		pr_err("Failed to get msi irq vector (err=%d)\n", irq);
+		return -ENODEV;
+	}
+
+	ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
+	if (ret) {
+		pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
+	}
 
 	return 0;
 }
