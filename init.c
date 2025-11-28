@@ -77,18 +77,13 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 	if (!pdev->is_busmaster)
 		pci_set_master(pdev);
 
-#ifdef CONFIG_WO_CXL
-	ret = pci_enable_msi(pdev);
-	if (ret) {
-		pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
-		return ret;
+	if (pci_dev_msi_enabled(pdev) == false) {
+		ret = pci_enable_msi(pdev);
+		if (ret) {
+			pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
+			return ret;
+		}
 	}
-#else
-	if (pci_msi_enabled() == false) {
-		pr_err("pci msi is disabled, cannot get irq vector\n");
-		return -ENODEV;
-	}
-#endif
 
 	int irq = pci_irq_vector(pdev, 0);
 	if (irq < 0) {
