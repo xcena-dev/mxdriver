@@ -15,9 +15,8 @@ targets:
     - exit:
       - ./.ci/qemu/exit.sh
   qemu_system:
-    - build:
-      - ./.ci/qemu/build.sh
     - init:
+      - ./.ci/qemu/build.sh
       - ./.ci/qemu/init.sh
     - post:
       - success:
