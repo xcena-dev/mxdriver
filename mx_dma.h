@@ -38,7 +38,6 @@
 
 enum {
 	MX_CDEV_DATA = 0,
-	MX_CDEV_DATA_NOWAIT,
 	MX_CDEV_CONTEXT,
 	MX_CDEV_IOCTL,
 	MX_CDEV_EVENT,
@@ -48,7 +47,6 @@ enum {
 
 static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_data",
-	MXDMA_NODE_NAME "%d_data_nowait",
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",

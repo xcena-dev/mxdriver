@@ -92,9 +92,6 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 	if (ret)
 		return ret;
 
-	if (mx_cdev->nowait)
-		return -EINVAL;
-
 	return read_data_from_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_READ);
 }
 
@@ -118,9 +115,6 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	if (ret)
 		return ret;
 
-	if (mx_cdev->nowait)
-		return -EINVAL;
-
 	return read_data_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_READ);
 }
 
@@ -139,7 +133,7 @@ static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf
 	if (ret)
 		return ret;
 
-	return write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, mx_cdev->nowait);
+	return write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
 }
 
 static ssize_t mxdma_device_write_context(struct file *file, const char __user *buf, size_t count, loff_t *pos)
@@ -157,7 +151,7 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 	if (ret)
 		return ret;
 
-	return write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, mx_cdev->nowait);
+	return write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, false);
 }
 
 static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -261,7 +255,6 @@ struct file_operations mxdma_fops_bdf = {
 
 struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_DATA] = &mxdma_fops_data,
-	[MX_CDEV_DATA_NOWAIT] = &mxdma_fops_data,
 	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
 	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,
 	[MX_CDEV_EVENT] = &mxdma_fops_event,

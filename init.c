@@ -160,7 +160,6 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 
 	mx_cdev->magic = MAGIC_CHAR;
 	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
-	mx_cdev->nowait = type == MX_CDEV_DATA_NOWAIT;
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
 	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->dev_id);
