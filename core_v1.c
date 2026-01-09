@@ -113,7 +113,7 @@ static int submit_handler(void *arg)
 				break;
 
 			push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
-			list_del(&transfer->entry);
+			list_del_init(&transfer->entry);
 
 			atomic_inc(&queue->common.wait_count);
 			swake_up_one(&queue->common.cq_wait);
@@ -138,12 +138,12 @@ static int complete_handler(void *arg)
 
 		while (is_popable(queue)) {
 			pop_mx_command(cq_mbox, &comm);
-			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(comm.id);
 			if (!transfer)
 				continue;
 
+			atomic_dec(&queue->common.wait_count);
 			transfer->result = comm.host_addr;
 			complete(&transfer->done);
 		}

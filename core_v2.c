@@ -159,7 +159,7 @@ static int submit_handler(void *arg)
 				break;
 
 			push_mx_command(queue, transfer->command);
-			list_del(&transfer->entry);
+			list_del_init(&transfer->entry);
 
 			atomic_inc(&queue->common.wait_count);
 			swake_up_one(&queue->common.cq_wait);
@@ -185,12 +185,12 @@ static int complete_handler(void *arg)
 
 		while (is_popable(queue)) {
 			pop_mx_completion(queue, &cmpl);
-			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(cmpl.command_id);
 			if (!transfer)
 				continue;
 
+			atomic_dec(&queue->common.wait_count);
 			transfer->result = cmpl.result;
 			complete(&transfer->done);
 		}
