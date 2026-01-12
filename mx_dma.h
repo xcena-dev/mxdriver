@@ -164,6 +164,7 @@ struct mx_char_dev {
 };
 
 struct mx_queue {
+	struct device *dev;
 	struct list_head sq_list;
 	spinlock_t sq_lock;
 	atomic_t wait_count;

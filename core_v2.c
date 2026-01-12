@@ -111,12 +111,16 @@ static void update_cq_doorbell(struct mx_queue_v2 *queue)
 static void push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
 {
 	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+	dev_dbg(queue->common.dev, "SQ+ tail=0x%02x id=0x%04x op=%u ha=0x%llx;0x%llx da=0x%llx len=%llu\n",
+			queue->sq_tail, comm->command_id, comm->opcode, comm->host_addr, comm->prp_entry2, comm->device_addr, comm->size);
 	update_sq_doorbell(queue);
 }
 
 static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
 {
 	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x res=0x%llx\n",
+			queue->cq_head, cmpl->command_id, cmpl->result);
 	queue->sq_head = cmpl->sq_head;
 	update_cq_doorbell(queue);
 }
@@ -405,6 +409,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 {
 	uint64_t __iomem *dbs = mx_pdev->bar + NVME_REG_DBS;
 
+	queue->common.dev = &mx_pdev->pdev->dev;
 	queue->qid = qid;
 	queue->sq_tail = 0;
 	queue->sq_head = 0;
