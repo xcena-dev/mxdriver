@@ -231,7 +231,7 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
-	if (mx_pdev->zombie_cleanup_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->zombie_cleanup_thread)) {
 		if (kthread_stop(mx_pdev->zombie_cleanup_thread) < 0)
 			pr_err("Failed to stop zombie_cleanup_thread\n");
 	}
@@ -316,9 +316,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->zombie_cleanup_thread = kthread_run(zombie_cleanup_handler, mx_pdev,
 			"mx_zombie_cleanup_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->zombie_cleanup_thread)) {
-		pr_err("Failed to create zombie cleanup thread (err=%ld)\n",
-				PTR_ERR(mx_pdev->zombie_cleanup_thread));
 		ret = PTR_ERR(mx_pdev->zombie_cleanup_thread);
+		pr_err("Failed to create zombie cleanup thread (err=%d)\n", ret);
 		goto out_fail;
 	}
 

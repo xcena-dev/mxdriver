@@ -380,7 +380,17 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	atomic_set(&queue->common.wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(submit_handler, queue, "mx_submit_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->submit_thread)) {
+		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
+		return PTR_ERR(mx_pdev->submit_thread);
+	}
+
 	mx_pdev->complete_thread = kthread_run(complete_handler, queue, "mx_complete_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->complete_thread)) {
+		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		kthread_stop(mx_pdev->submit_thread);
+		return PTR_ERR(mx_pdev->complete_thread);
+	}
 
 	mx_pdev->io_queue = (struct mx_queue *)queue;
 
@@ -391,13 +401,13 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 {
 	int ret;
 
-	if (mx_pdev->submit_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread)) {
 		ret = kthread_stop(mx_pdev->submit_thread);
 		if (ret)
 			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
 
-	if (mx_pdev->complete_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
 		ret = kthread_stop(mx_pdev->complete_thread);
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
