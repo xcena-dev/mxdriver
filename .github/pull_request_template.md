@@ -12,12 +12,24 @@
 
 ## 🌿 관련 PR(선택)
 <!-- 함께 확인해야할 REPO PR를 적어주세요 -->
-<!-- xip_branch: PR-123                    -->
+<!-- xip: PR-123                    -->
 <!-- cosmos: PR-33                         -->
 <!-- sdk_branch: PR-321                    -->
 
 ## 🌿 관련 Branch(선택)
-<!-- 함께 Build해야할 Branch를 적어주세요 -->
-<!-- xip_branch: dev_test                    -->
-<!-- mu_lib_branch: dev_test                 -->
-<!-- sdk_branch: dev_test                    -->
+<!-- 함께 Build 해야할 Branch의 path 및 branch 또는 commit hash를 적어주세요 -->
+<!-- xip_path: dev_test                    -->
+<!-- mu_lib_path: dev_test                 -->
+<!-- sdk_path: dev_test                    -->
+
+## 📦 Release Note (자동 생성용 / 영문 작성)
+### NEW
+<!-- 기재 예시                                 -->
+<!-- - PXL: Added Executor statistics feature. -->
+-
+### CHANGED
+-
+### FIXED
+-
+### IMPORTANT NOTES
+-
