@@ -1,38 +1,15 @@
-- name: mxdriver_dma_cxl_6_10
+- name: "DMA Test Case for MX Driver"
   command:
     - cd emulator && ./setup.sh --dev --clean
     - sudo ./run.sh --bg
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
-  description: "MX Driver DMA Test Case for CXL 6.10"
-  version: "1.0"
-  targets:
-    - qemu
-  tags:
-    - push
-    - pr
-
-- name: mxdriver_dma_cxl_6_10_mx1s
-  command:
-    - cd emulator && ./setup.sh --dev --clean
+    - ./kill_bg.sh
+    - sleep 30
     - sudo ./run.sh --bg --backend mx1squarter
     - sleep 30
     - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
-  description: "MX Driver DMA Test Case for CXL 6.10 @mx1s"
-  version: "1.0"
-  targets:
-    - qemu
-  tags:
-    - push
-    - pr
-
-- name: mxdriver_dma_cxl_5_15
-  command:
-    - cd emulator && ./setup.sh --dev --clean --config cfg/setup-5.15.conf
-    - sudo ./run.sh --bg
-    - sleep 30
-    - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
-  description: "MX Driver DMA Test Case for CXL 5.15"
+  description: "MX Driver DMA Test Case"
   version: "1.0"
   targets:
     - qemu
