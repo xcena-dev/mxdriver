@@ -18,7 +18,7 @@ on:
       public_repo_url:
         description: 'Public repository URL'
         required: false
-        default: 'https://github.com/metisx-dev/mxdriver.git'
+        default: 'https://github.com/xcena-dev/mxdriver.git'
         type: string
       target_branch:
         description: 'Target branch for public repo (default: main)'
@@ -44,7 +44,7 @@ jobs:
           else
             echo "root_directory=." >> $GITHUB_OUTPUT
             echo "ignore_file=.ignore_syn_push" >> $GITHUB_OUTPUT
-            echo "public_repo_url=https://github.com/metisx-dev/mxdriver.git" >> $GITHUB_OUTPUT
+            echo "public_repo_url=https://github.com/xcena-dev/mxdriver.git" >> $GITHUB_OUTPUT
             echo "target_branch=main" >> $GITHUB_OUTPUT
           fi
       - name: Remove files based on ignore list and prepare for sync

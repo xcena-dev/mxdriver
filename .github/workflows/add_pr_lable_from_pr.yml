@@ -8,7 +8,7 @@ on:
 
 jobs:
   call-label-from-pr:
-    uses: metisx-dev/.github/.github/workflows/added_label_template_repo.yml@main
+    uses: xcena-dev/.github/.github/workflows/added_label_template_repo.yml@main
     with:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}

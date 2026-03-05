@@ -6,9 +6,9 @@ on:
 
 jobs:
   assign-reviewers:
-      uses: metisx-dev/.github/.github/workflows/assign-team-reviewers.yml@main
+      uses: xcena-dev/.github/.github/workflows/assign-team-reviewers.yml@main
       with:
-        org: metisx-dev
+        org: xcena-dev
         team_slug: framework_c
         repository_name: ${{ github.event.repository.name }}
         pull_request_number: ${{ github.event.pull_request.number }}

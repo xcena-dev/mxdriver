@@ -9,7 +9,7 @@ on:
 jobs:
   check-external-approvals:
     name: Check External PR Approvals
-    uses: metisx-dev/.github/.github/workflows/check-external-pr-approvals.yml@main
+    uses: xcena-dev/.github/.github/workflows/check-external-pr-approvals.yml@main
     with:
       minimum-approvals: 1
     secrets:
