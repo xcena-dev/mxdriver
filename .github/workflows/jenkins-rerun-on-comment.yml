@@ -1,0 +1,52 @@
+name: Jenkins Rerun on PR Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  check-comment:
+    name: Check trigger comment
+    runs-on: ubuntu-latest
+    # Only run on PR comments containing 'jenkins go'
+    if: >
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, 'jenkins go')
+    outputs:
+      head_sha: ${{ steps.pr-info.outputs.head_sha }}
+      head_branch: ${{ steps.pr-info.outputs.head_branch }}
+
+    steps:
+      - name: Get PR head info
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
+        run: |
+          PR_INFO=$(curl -s \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "${{ github.event.issue.pull_request.url }}")
+
+          HEAD_SHA=$(echo "$PR_INFO" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['head']['sha'])")
+          HEAD_BRANCH=$(echo "$PR_INFO" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['head']['ref'])")
+
+          echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
+          echo "head_branch=$HEAD_BRANCH" >> $GITHUB_OUTPUT
+          echo "PR branch: $HEAD_BRANCH, SHA: $HEAD_SHA"
+
+  trigger:
+    name: Trigger Jenkins
+    needs: check-comment
+    uses: xcena-dev/.github/.github/workflows/jenkins-trigger-on-pr-comment.yml@main
+    with:
+      jenkins_url: 'http://192.168.57.60:8080'
+      job_name: 'TODO_JENKINS_JOB_NAME'
+      job_view: 'TODO_JENKINS_VIEW'
+      job_params_json: '{"GIT_COMMIT": "${{ needs.check-comment.outputs.head_sha }}"}'
+      pr_number: ${{ github.event.issue.number }}
+      comment_id: ${{ github.event.comment.id }}
+      head_sha: ${{ needs.check-comment.outputs.head_sha }}
+      runner_label: 'jenkins_trigger'
+    secrets:
+      JENKINS_TOKEN: ${{ secrets.JENKINS_TRIGGER_TOKEN }}
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
