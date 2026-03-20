@@ -125,12 +125,14 @@ int mx_submit_handler(void *arg)
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
+	bool pushed_any;
 
 	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(q->sq_wait,
 				!list_empty(&q->sq_list),
 				POLLING_INTERVAL_MSEC);
 
+		pushed_any = false;
 		spin_lock_irqsave(&q->sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
 			if (!ops->is_pushable(q))
@@ -138,6 +140,7 @@ int mx_submit_handler(void *arg)
 
 			ops->push_command(q, transfer->command);
 			list_del_init(&transfer->entry);
+			pushed_any = true;
 
 			if (transfer->no_completion) {
 				/*
@@ -156,6 +159,15 @@ int mx_submit_handler(void *arg)
 
 		if (ops->post_submit)
 			ops->post_submit(q);
+
+		/*
+		 * If the HW queue was full and no commands were pushed,
+		 * sleep to avoid busy-looping (the swait above does not
+		 * sleep when sq_list is non-empty).
+		 */
+		if (!pushed_any)
+			schedule_timeout_interruptible(
+					msecs_to_jiffies(POLLING_INTERVAL_MSEC));
 	}
 
 	return 0;
