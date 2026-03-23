@@ -313,6 +313,26 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			return 0;
 		}
 
+		/*
+		 * Transfer already submitted to HW. Wait non-interruptibly for
+		 * completion to avoid leaving the CXL transport in a corrupt
+		 * state. A short timeout prevents hanging process exit.
+		 */
+		left_time = wait_for_completion_timeout(&transfer->done,
+							msecs_to_jiffies(1000));
+		if (left_time > 0) {
+			/* Completed — clean up normally */
+			size = transfer->size;
+			if (transfer->is_sg)
+				mx_transfer_destroy_sg(mx_pdev, transfer);
+			else
+				mx_transfer_destroy_ctrl(transfer);
+			return size;
+		}
+
+		pr_warn("mx_dma: interrupted transfer did not complete within 1s (id=%u), marking zombie\n",
+				transfer->id);
+
 		/* Mark as zombie - device might still be accessing memory */
 		WRITE_ONCE(transfer->is_zombie, true);
 		transfer->zombie_timestamp = jiffies;
