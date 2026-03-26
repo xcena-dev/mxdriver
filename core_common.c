@@ -183,12 +183,14 @@ int mx_complete_handler(void *arg)
 	while (!kthread_should_stop()) {
 		bool zombie_only = (atomic_read(&q->wait_count) > 0 &&
 				    atomic_read(&q->zombie_wait_count) == atomic_read(&q->wait_count));
+		bool popped_any = false;
 
 		__swait_event_interruptible_timeout(q->cq_wait,
 			atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count) > 0,
 			zombie_only ? ZOMBIE_POLL_INTERVAL_MSEC : POLLING_INTERVAL_MSEC);
 
 		while (ops->is_popable(q)) {
+			popped_any = true;
 			ops->pop_completion(q, &info);
 
 			transfer = find_transfer_by_id(info.id);
@@ -217,6 +219,15 @@ int mx_complete_handler(void *arg)
 
 		if (ops->post_complete)
 			ops->post_complete(q);
+
+		/*
+		 * If completions were expected but none arrived, sleep to
+		 * avoid busy-looping (the swait above does not sleep when
+		 * its condition is already true).
+		 */
+		if (!popped_any)
+			schedule_timeout_interruptible(
+					msecs_to_jiffies(POLLING_INTERVAL_MSEC));
 	}
 
 	return 0;
