@@ -97,6 +97,36 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 }
 
 /******************************************************************************/
+/* Adaptive backoff for poll loops                                            */
+/******************************************************************************/
+
+/*
+ * When hardware is temporarily unresponsive, the handler spins with
+ * cond_resched() for BACKOFF_SPIN_ITERS iterations to stay responsive,
+ * then transitions to exponential sleep (1 -> 2 -> 4 -> ... -> 16 ms)
+ * to reduce CPU usage while preventing soft lockup.
+ */
+#define BACKOFF_SPIN_ITERS	128
+#define BACKOFF_MAX_SLEEP_MS	16
+
+static inline void poll_backoff(unsigned int *idle_count)
+{
+	unsigned int count = min(*idle_count + 1, 255u);
+	unsigned int shift, sleep_ms;
+
+	*idle_count = count;
+
+	if (count <= BACKOFF_SPIN_ITERS) {
+		cond_resched();
+		return;
+	}
+
+	shift = min_t(unsigned int, count - BACKOFF_SPIN_ITERS, 4);
+	sleep_ms = min_t(unsigned int, 1u << shift, BACKOFF_MAX_SLEEP_MS);
+	schedule_timeout_interruptible(msecs_to_jiffies(sleep_ms));
+}
+
+/******************************************************************************/
 /* Thread helpers                                                             */
 /******************************************************************************/
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
@@ -125,6 +155,7 @@ int mx_submit_handler(void *arg)
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
+	unsigned int idle_count = 0;
 	bool pushed_any;
 
 	while (!kthread_should_stop()) {
@@ -160,14 +191,10 @@ int mx_submit_handler(void *arg)
 		if (ops->post_submit)
 			ops->post_submit(q);
 
-		/*
-		 * If the HW queue was full and no commands were pushed,
-		 * sleep to avoid busy-looping (the swait above does not
-		 * sleep when sq_list is non-empty).
-		 */
-		if (!pushed_any)
-			schedule_timeout_interruptible(
-					msecs_to_jiffies(POLLING_INTERVAL_MSEC));
+		if (pushed_any)
+			idle_count = 0;
+		else
+			poll_backoff(&idle_count);
 	}
 
 	return 0;
@@ -179,16 +206,19 @@ int mx_complete_handler(void *arg)
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer;
 	struct mx_completion_info info;
+	unsigned int idle_count = 0;
 
 	while (!kthread_should_stop()) {
 		bool zombie_only = (atomic_read(&q->wait_count) > 0 &&
 				    atomic_read(&q->zombie_wait_count) == atomic_read(&q->wait_count));
+		bool popped_any = false;
 
 		__swait_event_interruptible_timeout(q->cq_wait,
 			atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count) > 0,
 			zombie_only ? ZOMBIE_POLL_INTERVAL_MSEC : POLLING_INTERVAL_MSEC);
 
 		while (ops->is_popable(q)) {
+			popped_any = true;
 			ops->pop_completion(q, &info);
 
 			transfer = find_transfer_by_id(info.id);
@@ -217,6 +247,11 @@ int mx_complete_handler(void *arg)
 
 		if (ops->post_complete)
 			ops->post_complete(q);
+
+		if (popped_any)
+			idle_count = 0;
+		else
+			poll_backoff(&idle_count);
 	}
 
 	return 0;
