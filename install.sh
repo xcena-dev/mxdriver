@@ -22,6 +22,11 @@ fi
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
 
+    # Remove legacy-installed module to avoid DKMS diff warning
+    for kdir in /lib/modules/*/updates; do
+        rm -f "${kdir}"/mx_dma.ko* 2>/dev/null || true
+    done
+
     # Remove previous DKMS registration if exists
     if dkms status "${PACKAGE_NAME}/${PACKAGE_VERSION}" 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
         echo "[INFO] Removing previous DKMS registration..."

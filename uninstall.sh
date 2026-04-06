@@ -17,11 +17,13 @@ if command -v dkms >/dev/null 2>&1 && \
     echo "[INFO] Removing ${PACKAGE_NAME} ${PACKAGE_VERSION} from DKMS..."
     dkms remove "${PACKAGE_NAME}/${PACKAGE_VERSION}" --all
     rm -rf "${SRC_DIR}"
-else
-    echo "[INFO] Removing legacy-installed module..."
-    rm -f "/lib/modules/$(uname -r)/updates/mx_dma.ko"
-    depmod -a
 fi
+
+# Always clean up legacy-installed module (may coexist with DKMS)
+for kdir in /lib/modules/*/updates; do
+    rm -f "${kdir}"/mx_dma.ko* 2>/dev/null || true
+done
+depmod -a
 
 # Remove auto-load config
 rm -f /etc/modules-load.d/mx_dma.conf
