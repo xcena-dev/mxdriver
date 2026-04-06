@@ -32,16 +32,19 @@ install_dkms() {
         echo "[INFO] Removing previous DKMS registration..."
         dkms remove "${PACKAGE_NAME}/${PACKAGE_VERSION}" --all 2>/dev/null || true
     fi
+    # Force-clean DKMS tree in case remove left stale entries
+    rm -rf "/var/lib/dkms/${PACKAGE_NAME}" 2>/dev/null || true
 
-    # Copy source to DKMS source tree
+    # Copy source to DKMS source tree (clean first to exclude build artifacts like mx_dma.mod.c)
     rm -rf "${SRC_DIR}"
     mkdir -p "${SRC_DIR}/scripts"
+    make clean 2>/dev/null || true
     cp -a Makefile dkms.conf *.c *.h "${SRC_DIR}/"
     cp -a scripts/dkms-post-install.sh "${SRC_DIR}/scripts/"
 
     dkms add "${PACKAGE_NAME}/${PACKAGE_VERSION}"
     dkms build "${PACKAGE_NAME}/${PACKAGE_VERSION}"
-    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}"
+    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}" --force
 
     echo "[INFO] DKMS installation completed. Module will auto-rebuild on kernel upgrades."
 }

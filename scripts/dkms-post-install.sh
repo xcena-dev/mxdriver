@@ -4,7 +4,9 @@
 kernelver="${1:-$(uname -r)}"
 
 if command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u -k "${kernelver}"
+    update-initramfs -u -k "${kernelver}" || echo "[WARN] initramfs update failed (non-fatal)"
 elif command -v dracut >/dev/null 2>&1; then
-    dracut --force --kver "${kernelver}"
+    dracut --force --kver "${kernelver}" || echo "[WARN] initramfs update failed (non-fatal)"
 fi
+
+exit 0
