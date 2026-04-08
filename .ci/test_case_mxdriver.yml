@@ -2,13 +2,13 @@
   command:
     - cd emulator && ./setup.sh --dev --clean
     - sudo ./run.sh --bg
-    - sleep 30
-    - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
+    - cnt=0; while [ $cnt -lt 60 ]; do sleep 5; ./ssh.sh 'true' 2>/dev/null && break || true; cnt=$((cnt+1)); done
+    - ./ssh.sh 'cd ~/sdk/tests/dma_test && ./test.sh'
     - ./kill_bg.sh
-    - sleep 30
+    - sleep 5
     - sudo ./run.sh --bg --backend mx1squarter
-    - sleep 30
-    - ./ssh.sh 'cd ./sdk; ls; cd ./tests/dma_test/ && ./test.sh'
+    - cnt=0; while [ $cnt -lt 60 ]; do sleep 5; ./ssh.sh 'true' 2>/dev/null && break || true; cnt=$((cnt+1)); done
+    - ./ssh.sh 'cd ~/sdk/tests/dma_test && ./test.sh'
   description: "MX Driver DMA Test Case"
   version: "1.0"
   targets:
