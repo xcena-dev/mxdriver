@@ -9,7 +9,7 @@ jobs:
       uses: xcena-dev/.github/.github/workflows/assign-team-reviewers.yml@main
       with:
         org: xcena-dev
-        team_slug: framework_c
+        team_slug: memory-platform
         repository_name: ${{ github.event.repository.name }}
         pull_request_number: ${{ github.event.pull_request.number }}
       secrets:
