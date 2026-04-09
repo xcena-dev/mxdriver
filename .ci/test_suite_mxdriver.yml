@@ -2,6 +2,7 @@ name: MX Driver DMA Test Suite
 description: "MX Driver DMA Test Suite"
 test_scope_includes:
   - .ci
+schedule: "0 21 * * *"
 working_repository: sdk_release
 targets:
   qemu:
