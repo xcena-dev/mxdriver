@@ -16,6 +16,7 @@
   tags:
     - push
     - pr
+    - scheduled
 
 - name: "qemu test"
   description: "Normal test"
@@ -24,6 +25,7 @@
   tags:
     - push
     - pr
+    - scheduled
   setup:
     - ./.ci/qemu/tests/normal/setup.sh
   command:
@@ -38,6 +40,7 @@
   tags:
     - push
     - pr
+    - scheduled
   setup:
     - ./.ci/qemu/tests/no_kvm/setup.sh
   command:
@@ -52,10 +55,10 @@
   tags:
     - push
     - pr
+    - scheduled
   setup:
     - ./.ci/qemu/tests/dump/setup.sh
   command:
     - ./.ci/qemu/tests/dump/command.sh
   teardown:
     - ./.ci/qemu/tests/dump/teardown.sh
-
