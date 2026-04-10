@@ -176,7 +176,10 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	while (is_full(sq_mbox)) {
 		mbox_context_t ctx;
 
-		read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+		if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
+			mutex_unlock(&sq_mbox->lock);
+			return -EINTR;
+		}
 		sq_mbox->ctx.head = ctx.head;
 	}
 
@@ -207,7 +210,10 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
+		mutex_unlock(&sq_mbox->lock);
+		return -EINTR;
+	}
 	sq_mbox->ctx.head = ctx.head;
 
 	count = get_pushable_count(sq_mbox);
@@ -253,7 +259,10 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	cq_mbox = mx_pdev->cq_mbox_list[recv_cmd.qid];
 
 	mutex_lock(&cq_mbox->lock);
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->r_ctx_addr, IO_OPCODE_CQ_READ);
+	if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->r_ctx_addr, IO_OPCODE_CQ_READ) <= 0) {
+		mutex_unlock(&cq_mbox->lock);
+		return -EINTR;
+	}
 	cq_mbox->ctx.tail = ctx.tail;
 
 	if (is_empty(cq_mbox))
@@ -267,7 +276,7 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	cq_mbox->ctx.head = get_next_index(cq_mbox->ctx.head, count, cq_mbox->depth);
 
 	read_data_from_device(mx_pdev, (char __user *)recv_cmd.cmds, count * sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_READ);
-	write_ctrl_to_device(mx_pdev, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->w_ctx_addr, IO_OPCODE_CQ_WRITE, false);
+	write_ctrl_to_device(mx_pdev, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->w_ctx_addr, IO_OPCODE_CQ_WRITE, true);
 
 out:
 	mutex_unlock(&cq_mbox->lock);
