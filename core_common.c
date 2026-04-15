@@ -125,7 +125,9 @@ static inline void poll_backoff(unsigned int *idle_count)
 
 	shift = min_t(unsigned int, (count - BACKOFF_SPIN_ITERS - 1) / BACKOFF_TICKS_PER_LEVEL, 7);
 	sleep_us = min_t(unsigned int, BACKOFF_BASE_SLEEP_US << shift, BACKOFF_MAX_SLEEP_US);
-	usleep_range(sleep_us, sleep_us + 100);
+	usleep_range_state(sleep_us,
+			   sleep_us + max_t(unsigned int, 100, sleep_us >> 3),
+			   TASK_INTERRUPTIBLE);
 }
 
 /******************************************************************************/
