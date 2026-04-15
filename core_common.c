@@ -103,16 +103,18 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 /*
  * When hardware is temporarily unresponsive, the handler spins with
  * cond_resched() for BACKOFF_SPIN_ITERS iterations to stay responsive,
- * then transitions to exponential sleep (1 -> 2 -> 4 -> ... -> 16 ms)
+ * then transitions to exponential sleep (125 -> 250 -> 500 -> ... -> 16000 us)
  * to reduce CPU usage while preventing soft lockup.
  */
-#define BACKOFF_SPIN_ITERS	128
-#define BACKOFF_MAX_SLEEP_MS	16
+#define BACKOFF_SPIN_ITERS	100
+#define BACKOFF_BASE_SLEEP_US	125
+#define BACKOFF_MAX_SLEEP_US	16000
+#define BACKOFF_TICKS_PER_LEVEL	4
 
 static inline void poll_backoff(unsigned int *idle_count)
 {
 	unsigned int count = min(*idle_count + 1, 255u);
-	unsigned int shift, sleep_ms;
+	unsigned int shift, sleep_us;
 
 	*idle_count = count;
 
@@ -121,9 +123,11 @@ static inline void poll_backoff(unsigned int *idle_count)
 		return;
 	}
 
-	shift = min_t(unsigned int, count - BACKOFF_SPIN_ITERS, 4);
-	sleep_ms = min_t(unsigned int, 1u << shift, BACKOFF_MAX_SLEEP_MS);
-	schedule_timeout_interruptible(msecs_to_jiffies(sleep_ms));
+	shift = min_t(unsigned int, (count - BACKOFF_SPIN_ITERS - 1) / BACKOFF_TICKS_PER_LEVEL, 7);
+	sleep_us = min_t(unsigned int, BACKOFF_BASE_SLEEP_US << shift, BACKOFF_MAX_SLEEP_US);
+	usleep_range_state(sleep_us,
+			   sleep_us + max_t(unsigned int, 100, sleep_us >> 3),
+			   TASK_INTERRUPTIBLE);
 }
 
 /******************************************************************************/
