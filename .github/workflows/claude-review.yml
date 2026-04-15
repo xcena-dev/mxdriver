@@ -26,4 +26,9 @@ jobs:
         - **Error/timeout resource cleanup**: Verify that zombie transfer handling on DMA timeout, signal interrupt, and hot-unplug prevents use-after-free.
         - **Kernel version compatibility**: Multiple kernel versions (6.1–6.12+) are supported via ifdefs. Verify that branching is correct and no paths are missed in DKMS automated builds.
         - **Build/install scripts**: Verify CXL presence detection, DKMS/legacy branching, and the security implications of udev rule changes.
+
+        ## Review Tone
+        - No praise. Minimize style/formatting nits — only flag when it hurts readability.
+        - Focus on correctness, safety, and stability.
+        - If nothing meaningful to flag, post a short LGTM comment and stop. Never use APPROVE.
     secrets: inherit
