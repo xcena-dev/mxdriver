@@ -47,7 +47,7 @@ struct mx_ioctl_passthru_cmd
 
 struct mx_ioctl_protocol_cmd
 {
-	void __user *buf;
+	char __user *buf;
 	size_t size;
 };
 
