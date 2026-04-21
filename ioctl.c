@@ -45,6 +45,12 @@ struct mx_ioctl_passthru_cmd
 	uint8_t  status;    /* output */
 };
 
+struct mx_ioctl_protocol_cmd
+{
+	char __user *buf;
+	size_t size;
+};
+
 #define MX_IOCTL_MAGIC			'X'
 #define MX_IOCTL_REGISTER_MBOX		_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
 #define MX_IOCTL_INIT_MBOX		_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
@@ -54,6 +60,8 @@ struct mx_ioctl_passthru_cmd
 #define MX_IOCTL_READ_DATA		_IOW(MX_IOCTL_MAGIC, 6, struct mx_ioctl_data)
 #define MX_IOCTL_WRITE_DATA		_IOW(MX_IOCTL_MAGIC, 7, struct mx_ioctl_data)
 #define MX_IOCTL_PASSTHRU_CMD		_IOWR(MX_IOCTL_MAGIC, 8, struct mx_ioctl_passthru_cmd)
+#define MX_IOCTL_HIO_SEND		_IOW(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
+#define MX_IOCTL_HIO_RECV		_IOW(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
 
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
@@ -349,6 +357,19 @@ static long ioctl_passthru_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
+static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, int opcode)
+{
+	struct mx_ioctl_protocol_cmd cmd;
+
+	if (copy_from_user(&cmd, (void __user *)arg, sizeof(cmd)))
+		return -EFAULT;
+
+	if (!cmd.buf)
+		return -EINVAL;
+
+	return submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
+}
+
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -368,6 +389,10 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 			return ioctl_write_data(mx_pdev, arg);
 		case MX_IOCTL_PASSTHRU_CMD:
 			return ioctl_passthru_cmd(mx_pdev, arg);
+		case MX_IOCTL_HIO_SEND:
+			return ioctl_hio_protocol(mx_pdev, arg, IO_OPCODE_SEND);
+		case MX_IOCTL_HIO_RECV:
+			return ioctl_hio_protocol(mx_pdev, arg, IO_OPCODE_RECV);
 		default:
 			pr_warn("unknown ioctl cmd(%u)\n", cmd);
 			return -EINVAL;

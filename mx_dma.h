@@ -71,6 +71,8 @@ enum {
 	IO_OPCODE_CQ_READ,
 	IO_OPCODE_CQ_WRITE,
 	IO_OPCODE_PASSTHRU,
+	IO_OPCODE_SEND,
+	IO_OPCODE_RECV,
 };
 
 static const char * const mxdma_op_name[] = {
@@ -83,6 +85,8 @@ static const char * const mxdma_op_name[] = {
 	"R_CQ(6)",
 	"W_CQ(7)",
 	"PASSTHRU(8)",
+	"SEND(9)",
+	"RECV(10)",
 };
 
 typedef union {
@@ -266,6 +270,8 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 			    uint64_t device_addr, uint64_t size, bool no_completion,
 			    uint8_t *out_status, uint64_t *out_host_addr);
+
+ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 

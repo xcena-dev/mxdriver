@@ -20,7 +20,7 @@ static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transf
 	if (sgt->nents)
 		dma_unmap_sg(dev, sgt->sgl, sgt->nents, transfer->dir);
 
-	if (transfer->dir == DMA_FROM_DEVICE) {
+	if (transfer->dir != DMA_TO_DEVICE) {
 		for (i = 0; i < transfer->pages_nr; i++) {
 			struct page *page = transfer->pages[i];
 			if (!page)
@@ -619,6 +619,26 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 	}
 
 	return mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, nowait);
+}
+
+/******************************************************************************/
+/* Protocol transfer (HIO Send/Recv)                                          */
+/******************************************************************************/
+ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode)
+{
+	struct mx_transfer *transfer;
+
+	/*
+	 * HIO Send/Recv both perform H2D and D2H on the same host buffer:
+	 *   Send: H2D(full buffer) -> firmware -> D2H(status in command page)
+	 *   Recv: H2D(command page) -> firmware -> D2H(response in full buffer)
+	 * DMA_BIDIRECTIONAL is required.
+	 */
+	transfer = alloc_mx_transfer(buf, size, 0, DMA_BIDIRECTIONAL);
+	if (!transfer)
+		return -ENOMEM;
+
+	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
 }
 
 /******************************************************************************/
