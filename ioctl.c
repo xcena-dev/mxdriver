@@ -360,7 +360,6 @@ static long ioctl_passthru_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, int opcode)
 {
 	struct mx_ioctl_protocol_cmd cmd;
-	ssize_t ret;
 
 	if (copy_from_user(&cmd, (void __user *)arg, sizeof(cmd)))
 		return -EFAULT;
@@ -368,11 +367,7 @@ static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, in
 	if (!cmd.buf || cmd.size < PAGE_SIZE)
 		return -EINVAL;
 
-	ret = submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
-	if (ret < 0)
-		return ret;
-
-	return ret;
+	return submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
 }
 
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
