@@ -364,7 +364,7 @@ static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, in
 	if (copy_from_user(&cmd, (void __user *)arg, sizeof(cmd)))
 		return -EFAULT;
 
-	if (!cmd.buf || cmd.size < PAGE_SIZE)
+	if (!cmd.buf)
 		return -EINVAL;
 
 	return submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
