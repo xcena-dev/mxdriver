@@ -635,10 +635,8 @@ ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, s
 	 * DMA_BIDIRECTIONAL is required.
 	 */
 	transfer = alloc_mx_transfer(buf, size, 0, DMA_BIDIRECTIONAL);
-	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer for protocol cmd\n");
+	if (!transfer)
 		return -ENOMEM;
-	}
 
 	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
 }

@@ -60,8 +60,8 @@ struct mx_ioctl_protocol_cmd
 #define MX_IOCTL_READ_DATA		_IOW(MX_IOCTL_MAGIC, 6, struct mx_ioctl_data)
 #define MX_IOCTL_WRITE_DATA		_IOW(MX_IOCTL_MAGIC, 7, struct mx_ioctl_data)
 #define MX_IOCTL_PASSTHRU_CMD		_IOWR(MX_IOCTL_MAGIC, 8, struct mx_ioctl_passthru_cmd)
-#define MX_IOCTL_HIO_SEND		_IOWR(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
-#define MX_IOCTL_HIO_RECV		_IOWR(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
+#define MX_IOCTL_HIO_SEND		_IOW(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
+#define MX_IOCTL_HIO_RECV		_IOW(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
 
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
@@ -372,7 +372,7 @@ static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, in
 	if (ret < 0)
 		return ret;
 
-	return 0;
+	return ret;
 }
 
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
