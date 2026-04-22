@@ -92,6 +92,7 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 	if (ret)
 		return ret;
 
+	mx_prewake_handlers(mx_pdev);
 	return read_data_from_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_READ);
 }
 
@@ -115,6 +116,7 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	if (ret)
 		return ret;
 
+	mx_prewake_handlers(mx_pdev);
 	return read_data_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_READ);
 }
 
@@ -133,6 +135,7 @@ static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf
 	if (ret)
 		return ret;
 
+	mx_prewake_handlers(mx_pdev);
 	return write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
 }
 
@@ -151,6 +154,7 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 	if (ret)
 		return ret;
 
+	mx_prewake_handlers(mx_pdev);
 	return write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, false);
 }
 
@@ -164,6 +168,7 @@ static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	if (ret)
 		return ret;
 
+	mx_prewake_handlers(mx_pdev);
 	return ioctl_to_device(mx_pdev, cmd, arg);
 }
 
