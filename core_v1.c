@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: <SPDX License Expression>
 
 #include <linux/atomic.h>
+#include <linux/sched.h>
 
 #include "mx_dma.h"
 
@@ -313,6 +314,13 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
 		return PTR_ERR(mx_pdev->submit_thread);
 	}
+	/*
+	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
+	 * a userspace I/O submission doesn't pay CFS wake latency when the box
+	 * is busy.  Handlers still yield via cond_resched() and sleep in
+	 * swait_event when idle, so softlockup/RCU stalls are not a concern.
+	 */
+	sched_set_fifo_low(mx_pdev->submit_thread);
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
@@ -320,6 +328,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 		kthread_stop(mx_pdev->submit_thread);
 		return PTR_ERR(mx_pdev->complete_thread);
 	}
+	sched_set_fifo_low(mx_pdev->complete_thread);
 
 	mx_pdev->io_queue = (struct mx_queue *)queue;
 

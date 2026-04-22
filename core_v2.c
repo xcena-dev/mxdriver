@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: <SPDX License Expression>
 
 #include <linux/nvme.h>
+#include <linux/sched.h>
 
 #include "mx_dma.h"
 
@@ -455,12 +456,16 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
 		return PTR_ERR(mx_pdev->submit_thread);
 	}
+	/* See core_v1.c: SCHED_FIFO (lowest RT band) for low scheduling latency. */
+	sched_set_fifo_low(mx_pdev->submit_thread);
+
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &io_queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
 		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
 		kthread_stop(mx_pdev->submit_thread);
 		return PTR_ERR(mx_pdev->complete_thread);
 	}
+	sched_set_fifo_low(mx_pdev->complete_thread);
 
 	mx_pdev->io_queue = (struct mx_queue *)io_queue;
 
