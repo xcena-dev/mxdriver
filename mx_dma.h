@@ -284,6 +284,22 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
 
+/*
+ * Wake both submit and complete handlers so they start running in parallel
+ * with userspace transfer setup (page pinning, DMA mapping, command build).
+ * Safe to call from any I/O entry point; cheap no-op if handlers are already
+ * running.
+ */
+static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
+{
+	struct mx_queue *q = mx_pdev ? mx_pdev->io_queue : NULL;
+
+	if (!q)
+		return;
+	swake_up_one(&q->sq_wait);
+	swake_up_one(&q->cq_wait);
+}
+
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
 
