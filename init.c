@@ -233,6 +233,9 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
+	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
+		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
+
 	mx_pdev->ops.release_queue(mx_pdev);
 
 	if (!IS_ERR_OR_NULL(mx_pdev->zombie_cleanup_thread)) {
@@ -268,6 +271,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
+
+	/*
+	 * Hold a cpu_latency PM QoS for the device's lifetime.  Blocks deep
+	 * C-states whose exit latency would stretch the freq ramp-up window
+	 * that adds ~12 us to cold DMA submissions in our measurements.
+	 * Removed in destroy_mx_pdev (including the out_fail path).
+	 */
+	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req, MX_CPU_LATENCY_QOS_US);
 
 	if (pdev->revision == 0x1) {
 		register_mx_ops_v1(&mx_pdev->ops);

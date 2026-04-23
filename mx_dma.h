@@ -12,6 +12,7 @@
 #include <linux/aer.h>
 #include <linux/kthread.h>
 #include <linux/numa.h>
+#include <linux/pm_qos.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/swait.h>
@@ -39,6 +40,15 @@
 
 #define POLLING_INTERVAL_MSEC	4
 #define ZOMBIE_POLL_INTERVAL_MSEC	1000
+
+/*
+ * Wake-up latency budget held via cpu_latency_qos for the lifetime of each
+ * mx device.  Blocks deep C-states whose exit latency would stretch the
+ * freq ramp-up window we observed adding ~12 us to cold DMA submissions.
+ * Small enough to still allow shallow idle for power; large enough not to
+ * force a polling-idle CPU.
+ */
+#define MX_CPU_LATENCY_QOS_US	50
 
 enum {
 	MX_CDEV_DATA = 0,
@@ -250,6 +260,12 @@ struct mx_pci_dev {
 	struct list_head zombie_list;
 	spinlock_t zombie_lock;
 	struct task_struct *zombie_cleanup_thread;
+
+	/*
+	 * Held across the device's lifetime to block deep C-states.  Shallow
+	 * idle is still allowed so we don't force a polling-idle CPU.
+	 */
+	struct pm_qos_request cpu_latency_req;
 };
 
 extern struct file_operations *mxdma_fops_array[];
