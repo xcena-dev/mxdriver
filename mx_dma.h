@@ -15,6 +15,7 @@
 #include <linux/pm_qos.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
+#include <linux/scatterlist.h>
 #include <linux/swait.h>
 #include <linux/topology.h>
 
@@ -40,6 +41,22 @@
 
 #define POLLING_INTERVAL_MSEC	4
 #define ZOMBIE_POLL_INTERVAL_MSEC	1000
+
+/*
+ * Single-page fast path: embed one struct page * and one scatterlist inside
+ * mx_transfer so the 8 B / sub-page hot path skips kcalloc(pages) and
+ * sg_alloc_table_from_pages().  Multi-page transfers still fall back to the
+ * dynamic allocations in map_user_addr_to_sg().
+ */
+#define MX_PAGES_INLINE_NR	1
+
+/*
+ * Inline storage for the hardware command struct.  Sized to the larger of
+ * the v1 / v2 struct mx_command definitions (v1=32 B, v2=64 B).  Enforced
+ * by BUILD_BUG_ON in each core_v*.c; bumping either struct past this limit
+ * fails the build instead of silently overrunning.
+ */
+#define MX_CMD_INLINE_SIZE	64
 
 /*
  * Wake-up latency budget held via cpu_latency_qos for the lifetime of each
@@ -172,6 +189,16 @@ struct mx_transfer {
 	int desc_list_cnt;
 	void **desc_list_va;
 	dma_addr_t *desc_list_ba;
+
+	/*
+	 * Inline fast-path storage.  Active when pages_nr <= MX_PAGES_INLINE_NR.
+	 * Free paths detect inline use by pointer identity
+	 * (pages == pages_inline, sgt.sgl == sg_inline, command == cmd_inline)
+	 * and skip the corresponding kfree / sg_free_table.
+	 */
+	struct page		*pages_inline[MX_PAGES_INLINE_NR];
+	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
+	uint8_t			 cmd_inline[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
 struct mx_event {

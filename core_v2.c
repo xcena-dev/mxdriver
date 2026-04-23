@@ -211,12 +211,10 @@ static const struct mx_queue_ops v2_queue_ops = {
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
-	}
+	BUILD_BUG_ON(sizeof(struct mx_command) > MX_CMD_INLINE_SIZE);
+	memset(comm, 0, sizeof(*comm));
 
 	comm->opcode = opcode;
 	comm->command_id = transfer->id;
@@ -241,7 +239,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	comm->prp_entry1 = sg_dma_address(sg);
 	if (!comm->prp_entry1) {
 		pr_warn("Failed to get sg_dma_address\n");
-		kfree(comm);
 		return NULL;
 	}
 
@@ -254,14 +251,12 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 			comm->prp_entry2 = sg_dma_address(sg_next(sg));
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
-			kfree(comm);
 			return NULL;
 		}
 	} else {
 		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
-			kfree(comm);
 			return NULL;
 		}
 	}

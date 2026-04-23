@@ -32,12 +32,20 @@ static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transf
 	if (transfer->pages_nr > 0)
 		unpin_user_pages(transfer->pages, transfer->pages_nr);
 
-	sg_free_table(&transfer->sgt);
+	/*
+	 * Inline SG (sg_inline[]) is embedded in mx_transfer — calling
+	 * sg_free_table() on it would kfree a static array.  Only free the
+	 * table when sg_alloc_table_from_pages() backed the sgl.
+	 */
+	if (sgt->sgl && sgt->sgl != transfer->sg_inline)
+		sg_free_table(sgt);
+	sgt->sgl = NULL;
+	sgt->nents = 0;
+	sgt->orig_nents = 0;
 
-	if (transfer->pages) {
+	if (transfer->pages && transfer->pages != transfer->pages_inline)
 		kfree(transfer->pages);
-		transfer->pages = NULL;
-	}
+	transfer->pages = NULL;
 }
 
 static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
@@ -56,10 +64,18 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	if (!pages_nr)
 		return 0;
 
-	transfer->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
-	if (!transfer->pages) {
-		pr_warn("Failed to alloc pages\n");
-		return -ENOMEM;
+	/*
+	 * Fast path: single-page transfers reuse the inline array embedded in
+	 * mx_transfer.  Only the >MX_PAGES_INLINE_NR case hits the allocator.
+	 */
+	if (pages_nr <= MX_PAGES_INLINE_NR) {
+		transfer->pages = transfer->pages_inline;
+	} else {
+		transfer->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
+		if (!transfer->pages) {
+			pr_warn("Failed to alloc pages\n");
+			return -ENOMEM;
+		}
 	}
 
 	/* Pin user_addr to pages */
@@ -69,7 +85,8 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, transfer->pages);
 	if (pinned < 0) {
 		pr_warn("pin_user_pages_fast failed (err=%ld)\n", pinned);
-		kfree(transfer->pages);
+		if (transfer->pages != transfer->pages_inline)
+			kfree(transfer->pages);
 		transfer->pages = NULL;
 		return (int)pinned;
 	}
@@ -77,26 +94,47 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 		pr_warn("pin_user_pages_fast partial (req=%u, got=%ld)\n", pages_nr, pinned);
 		if (pinned > 0)
 			unpin_user_pages(transfer->pages, pinned);
-		kfree(transfer->pages);
+		if (transfer->pages != transfer->pages_inline)
+			kfree(transfer->pages);
 		transfer->pages = NULL;
 		return -EFAULT;
 	}
 	transfer->pages_nr = pages_nr;
 
-	/* Alloc sg_table as pages_nr */
-	ret = sg_alloc_table_from_pages(sgt, transfer->pages, pages_nr, offset, size, GFP_KERNEL);
-	if (ret) {
-		pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
-		unpin_user_pages(transfer->pages, transfer->pages_nr);
-		transfer->pages_nr = 0;
-		return ret;
+	if (pages_nr <= MX_PAGES_INLINE_NR) {
+		/*
+		 * Hand-build a single-entry sg_table using the inline scatterlist.
+		 * Skipping sg_alloc_table_from_pages() saves its internal kmalloc
+		 * plus the dynamic sgl free path in unmap_user_addr_to_sg().
+		 */
+		sg_init_table(transfer->sg_inline, MX_PAGES_INLINE_NR);
+		sg_set_page(&transfer->sg_inline[0], transfer->pages[0], size, offset);
+		sgt->sgl = transfer->sg_inline;
+		sgt->orig_nents = pages_nr;
+		sgt->nents = pages_nr;
+	} else {
+		ret = sg_alloc_table_from_pages(sgt, transfer->pages, pages_nr, offset, size, GFP_KERNEL);
+		if (ret) {
+			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
+			unpin_user_pages(transfer->pages, transfer->pages_nr);
+			if (transfer->pages != transfer->pages_inline)
+				kfree(transfer->pages);
+			transfer->pages = NULL;
+			transfer->pages_nr = 0;
+			return ret;
+		}
 	}
 
 	/* Map the given buffer for DMA */
 	sgt->nents = dma_map_sg(dev, sgt->sgl, sgt->orig_nents, transfer->dir);
 	if (!sgt->nents) {
-		sg_free_table(sgt);
+		if (sgt->sgl != transfer->sg_inline)
+			sg_free_table(sgt);
+		sgt->sgl = NULL;
 		unpin_user_pages(transfer->pages, transfer->pages_nr);
+		if (transfer->pages != transfer->pages_inline)
+			kfree(transfer->pages);
+		transfer->pages = NULL;
 		pr_warn("Failed to dma_map_sg\n");
 		return -EIO;
 	}
@@ -169,7 +207,8 @@ fail:
 static void release_mx_transfer(struct mx_transfer *transfer)
 {
 	transfer_id_free(transfer->id);
-	kfree(transfer->command);
+	if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
+		kfree(transfer->command);
 	kfree(transfer);
 }
 
@@ -741,7 +780,8 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 			desc_list_free(mx_pdev, transfer);
 		}
 
-		kfree(transfer->command);
+		if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
+			kfree(transfer->command);
 		kfree(transfer);
 	}
 }
