@@ -11,8 +11,11 @@
 #include <linux/pci.h>
 #include <linux/aer.h>
 #include <linux/kthread.h>
+#include <linux/numa.h>
 #include <linux/poll.h>
+#include <linux/sched.h>
 #include <linux/swait.h>
+#include <linux/topology.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -298,6 +301,36 @@ static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
 		return;
 	swake_up_one(&q->sq_wait);
 	swake_up_one(&q->cq_wait);
+}
+
+/*
+ * Restrict io handler kthreads to the device-local NUMA node so their
+ * cache traffic (descriptor ring, sq/cq_wait, transfer structs) stays
+ * node-local.  This is a soft affinity hint via set_cpus_allowed_ptr,
+ * not a hard kthread_bind: operators can still override with taskset
+ * to colocate handlers with a specific userspace CPU.  No-op when the
+ * device has no NUMA affinity or the node cpumask is empty.
+ */
+static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
+{
+	const struct cpumask *mask;
+	int node;
+
+	if (!mx_pdev || !mx_pdev->pdev)
+		return;
+
+	node = dev_to_node(&mx_pdev->pdev->dev);
+	if (node == NUMA_NO_NODE)
+		return;
+
+	mask = cpumask_of_node(node);
+	if (cpumask_empty(mask))
+		return;
+
+	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread))
+		set_cpus_allowed_ptr(mx_pdev->submit_thread, mask);
+	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread))
+		set_cpus_allowed_ptr(mx_pdev->complete_thread, mask);
 }
 
 void register_mx_ops_v1(struct mx_operations *ops);
