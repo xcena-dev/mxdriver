@@ -92,7 +92,19 @@ static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 	void __iomem *data_addr;
 
 	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->head);
-	memcpy_fromio(comm, data_addr, sizeof(struct mx_command));
+
+	/*
+	 * The completion path consumes only the header (id / control) and
+	 * host_addr (result).  size and device_addr are producer-side fields
+	 * unused on the completion side, so skip the extra 2 readq per pop
+	 * (v1 profile shows pop_mx_command memcpy_fromio at ~6.5 % of total).
+	 * Zero the untouched words so any caller that stringifies them (e.g.
+	 * dev_dbg below) prints 0 instead of stack garbage.
+	 */
+	comm->header      = readq(data_addr);
+	comm->size        = 0;
+	comm->device_addr = 0;
+	comm->host_addr   = readq(data_addr + offsetof(struct mx_command, host_addr));
 
 	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx da=0x%llx len=%llu\n",
 			ctx->head, comm->id, comm->opcode, comm->host_addr, comm->device_addr, comm->size);
