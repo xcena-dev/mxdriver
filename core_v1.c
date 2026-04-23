@@ -332,6 +332,8 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	mx_pdev->io_queue = (struct mx_queue *)queue;
 
+	mx_bind_handlers_to_numa(mx_pdev);
+
 	return 0;
 }
 
