@@ -6,6 +6,7 @@
 /* Initialization                                                             */
 /******************************************************************************/
 static struct class *mxdma_class;
+struct kmem_cache *mx_transfer_cache;
 
 #ifndef CONFIG_WO_CXL
 static LIST_HEAD(mx_device_list_head);
@@ -540,10 +541,28 @@ static int mxdma_init(void)
 
 	mxdma_class->devnode = mxdma_devnode;
 
+	mx_transfer_cache = kmem_cache_create("mx_transfer",
+					      sizeof(struct mx_transfer), 0,
+					      SLAB_HWCACHE_ALIGN, NULL);
+	if (!mx_transfer_cache) {
+		pr_err("Failed to create mx_transfer kmem_cache\n");
+		class_destroy(mxdma_class);
+		return -ENOMEM;
+	}
+
 	pr_info("MXDMA driver is loaded\n");
 
 #ifdef CONFIG_WO_CXL
-	return pci_register_driver(&pci_driver);
+	{
+		int ret = pci_register_driver(&pci_driver);
+
+		if (ret) {
+			kmem_cache_destroy(mx_transfer_cache);
+			mx_transfer_cache = NULL;
+			class_destroy(mxdma_class);
+		}
+		return ret;
+	}
 #else
 	bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
 	return 0;
@@ -578,6 +597,16 @@ static void mxdma_exit(void)
 	bus_unregister_notifier(&pci_bus_type, &mxdma_pci_notifier);
 	destroy_device_list();
 #endif
+
+	/*
+	 * PCI unregister / device-list teardown above completes all in-flight
+	 * transfers (including zombie drain in remove()), so every mx_transfer
+	 * has been returned to the slab before we destroy the cache.
+	 */
+	if (mx_transfer_cache) {
+		kmem_cache_destroy(mx_transfer_cache);
+		mx_transfer_cache = NULL;
+	}
 
 	if (mxdma_class)
 		class_destroy(mxdma_class);
