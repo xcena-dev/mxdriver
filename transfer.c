@@ -209,7 +209,7 @@ static void release_mx_transfer(struct mx_transfer *transfer)
 	transfer_id_free(transfer->id);
 	if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
 		kfree(transfer->command);
-	kfree(transfer);
+	kmem_cache_free(mx_transfer_cache, transfer);
 }
 
 static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
@@ -217,7 +217,7 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 {
 	struct mx_transfer *transfer;
 
-	transfer = kzalloc(sizeof(struct mx_transfer), GFP_KERNEL);
+	transfer = kmem_cache_zalloc(mx_transfer_cache, GFP_KERNEL);
 	if (!transfer) {
 		return NULL;
 	}
@@ -228,7 +228,7 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 	transfer->id = transfer_id_alloc(transfer);
 	if (transfer->id < 0) {
 		pr_warn("Failed to alloc transfer_id\n");
-		kfree(transfer);
+		kmem_cache_free(mx_transfer_cache, transfer);
 		return NULL;
 	}
 
@@ -782,7 +782,7 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 
 		if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
 			kfree(transfer->command);
-		kfree(transfer);
+		kmem_cache_free(mx_transfer_cache, transfer);
 	}
 }
 

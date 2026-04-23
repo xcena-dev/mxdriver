@@ -297,6 +297,14 @@ struct mx_pci_dev {
 
 extern struct file_operations *mxdma_fops_array[];
 
+/*
+ * Dedicated slab cache for struct mx_transfer.  Sized exactly to the
+ * transfer and tagged SLAB_HWCACHE_ALIGN so per-op alloc/free hits a
+ * hot per-cpu magazine instead of the generic kmalloc-256/512 buckets.
+ * Created in mxdma_init(), destroyed in mxdma_exit().
+ */
+extern struct kmem_cache *mx_transfer_cache;
+
 int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);
 void *find_transfer_by_id(unsigned long id);
