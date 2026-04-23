@@ -155,12 +155,10 @@ static const struct mx_queue_ops v1_queue_ops = {
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
-	}
+	BUILD_BUG_ON(sizeof(struct mx_command) > MX_CMD_INLINE_SIZE);
+	memset(comm, 0, sizeof(*comm));
 
 	comm->magic = MAGIC_COMMAND;
 	comm->id = transfer->id;
@@ -192,7 +190,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		comm->host_addr = sg_dma_address(sg);
 		if (!comm->host_addr) {
 			pr_warn("Failed to get sg_dma_address\n");
-			kfree(comm);
 			return NULL;
 		}
 	} else {
@@ -200,7 +197,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		comm->prp_entry1 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, false);
 		if (!comm->prp_entry1) {
 			pr_warn("Failed to get desc_list_init\n");
-			kfree(comm);
 			return NULL;
 		}
 	}
@@ -236,12 +232,9 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 
 static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command for passthru\n");
-		return NULL;
-	}
+	memset(comm, 0, sizeof(*comm));
 
 	comm->magic = MAGIC_COMMAND;
 	comm->opcode = IO_OPCODE_PASSTHRU;
