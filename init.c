@@ -6,6 +6,7 @@
 /* Initialization                                                             */
 /******************************************************************************/
 static struct class *mxdma_class;
+struct kmem_cache *mx_transfer_cache;
 
 #ifndef CONFIG_WO_CXL
 static LIST_HEAD(mx_device_list_head);
@@ -233,6 +234,9 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
+	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
+		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
+
 	mx_pdev->ops.release_queue(mx_pdev);
 
 	if (!IS_ERR_OR_NULL(mx_pdev->zombie_cleanup_thread)) {
@@ -279,6 +283,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		pr_err("Unknown PCI device revision %d\n", pdev->revision);
 		return -EINVAL;
 	}
+
+	/*
+	 * Hold a cpu_latency PM QoS for the device's lifetime to block deep C-states whose exit latency would stretch
+	 * the freq ramp-up window that adds ~12 us to cold DMA submissions in our measurements.
+	 * Acquired after ops registration so every failure below can route through out_fail -> destroy_mx_pdev() for
+	 * symmetric cleanup; the unknown-revision early return above must not leak a QoS request.
+	 */
+	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req, MX_CPU_LATENCY_QOS_US);
 
 	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MX_CDEV, MXDMA_NODE_NAME);
 	if (ret) {
@@ -529,13 +541,40 @@ static int mxdma_init(void)
 
 	mxdma_class->devnode = mxdma_devnode;
 
+	mx_transfer_cache = kmem_cache_create("mx_transfer",
+					      sizeof(struct mx_transfer), 0,
+					      SLAB_HWCACHE_ALIGN, NULL);
+	if (!mx_transfer_cache) {
+		pr_err("Failed to create mx_transfer kmem_cache\n");
+		class_destroy(mxdma_class);
+		return -ENOMEM;
+	}
+
 	pr_info("MXDMA driver is loaded\n");
 
 #ifdef CONFIG_WO_CXL
-	return pci_register_driver(&pci_driver);
+	{
+		int ret = pci_register_driver(&pci_driver);
+
+		if (ret) {
+			kmem_cache_destroy(mx_transfer_cache);
+			mx_transfer_cache = NULL;
+			class_destroy(mxdma_class);
+		}
+		return ret;
+	}
 #else
-	bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
-	return 0;
+	{
+		int ret = bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
+
+		if (ret) {
+			pr_err("Failed to register PCI bus notifier (err=%d)\n", ret);
+			kmem_cache_destroy(mx_transfer_cache);
+			mx_transfer_cache = NULL;
+			class_destroy(mxdma_class);
+		}
+		return ret;
+	}
 #endif
 }
 
@@ -567,6 +606,16 @@ static void mxdma_exit(void)
 	bus_unregister_notifier(&pci_bus_type, &mxdma_pci_notifier);
 	destroy_device_list();
 #endif
+
+	/*
+	 * PCI unregister / device-list teardown above completes all in-flight
+	 * transfers (including zombie drain in remove()), so every mx_transfer
+	 * has been returned to the slab before we destroy the cache.
+	 */
+	if (mx_transfer_cache) {
+		kmem_cache_destroy(mx_transfer_cache);
+		mx_transfer_cache = NULL;
+	}
 
 	if (mxdma_class)
 		class_destroy(mxdma_class);

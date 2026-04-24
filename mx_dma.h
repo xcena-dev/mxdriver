@@ -11,8 +11,13 @@
 #include <linux/pci.h>
 #include <linux/aer.h>
 #include <linux/kthread.h>
+#include <linux/numa.h>
+#include <linux/pm_qos.h>
 #include <linux/poll.h>
+#include <linux/sched.h>
+#include <linux/scatterlist.h>
 #include <linux/swait.h>
+#include <linux/topology.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -36,6 +41,30 @@
 
 #define POLLING_INTERVAL_MSEC	4
 #define ZOMBIE_POLL_INTERVAL_MSEC	1000
+
+/*
+ * Single-page fast path: embed one struct page * and one scatterlist inside
+ * mx_transfer so the 8 B / sub-page hot path skips kcalloc(pages) and
+ * sg_alloc_table_from_pages().  Multi-page transfers still fall back to the
+ * dynamic allocations in map_user_addr_to_sg().
+ */
+#define MX_PAGES_INLINE_NR	1
+
+/*
+ * Inline storage for the hardware command struct.  Sized to the larger of the v1 / v2 struct mx_command definitions
+ * (v1=32 B, v2=64 B).  Enforced by static_assert alongside each struct mx_command definition in core_v1.c /
+ * core_v2.c, so bumping either struct past this limit fails the build instead of silently overrunning.
+ */
+#define MX_CMD_INLINE_SIZE	64
+
+/*
+ * Wake-up latency budget held via cpu_latency_qos for the lifetime of each
+ * mx device.  Blocks deep C-states whose exit latency would stretch the
+ * freq ramp-up window we observed adding ~12 us to cold DMA submissions.
+ * Small enough to still allow shallow idle for power; large enough not to
+ * force a polling-idle CPU.
+ */
+#define MX_CPU_LATENCY_QOS_US	8
 
 enum {
 	MX_CDEV_DATA = 0,
@@ -159,6 +188,16 @@ struct mx_transfer {
 	int desc_list_cnt;
 	void **desc_list_va;
 	dma_addr_t *desc_list_ba;
+
+	/*
+	 * Inline fast-path storage.  Active when pages_nr <= MX_PAGES_INLINE_NR.
+	 * Free paths detect inline use by pointer identity
+	 * (pages == pages_inline, sgt.sgl == sg_inline, command == cmd_inline)
+	 * and skip the corresponding kfree / sg_free_table.
+	 */
+	struct page		*pages_inline[MX_PAGES_INLINE_NR];
+	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
+	uint8_t			 cmd_inline[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
 struct mx_event {
@@ -247,9 +286,23 @@ struct mx_pci_dev {
 	struct list_head zombie_list;
 	spinlock_t zombie_lock;
 	struct task_struct *zombie_cleanup_thread;
+
+	/*
+	 * Held across the device's lifetime to block deep C-states.  Shallow
+	 * idle is still allowed so we don't force a polling-idle CPU.
+	 */
+	struct pm_qos_request cpu_latency_req;
 };
 
 extern struct file_operations *mxdma_fops_array[];
+
+/*
+ * Dedicated slab cache for struct mx_transfer.  Sized exactly to the
+ * transfer and tagged SLAB_HWCACHE_ALIGN so per-op alloc/free hits a
+ * hot per-cpu magazine instead of the generic kmalloc-256/512 buckets.
+ * Created in mxdma_init(), destroyed in mxdma_exit().
+ */
+extern struct kmem_cache *mx_transfer_cache;
 
 int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);
@@ -283,6 +336,57 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *trans
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
+
+/*
+ * Wake both submit and complete handlers so they start running in parallel
+ * with userspace transfer setup (page pinning, DMA mapping, command build).
+ * Safe to call from any I/O entry point; cheap no-op if handlers are already
+ * running.
+ */
+static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
+{
+	struct mx_queue *q = mx_pdev ? mx_pdev->io_queue : NULL;
+
+	if (!q)
+		return;
+	swake_up_one(&q->sq_wait);
+	swake_up_one(&q->cq_wait);
+}
+
+/*
+ * Restrict io handler kthreads to the device-local NUMA node so their
+ * cache traffic (descriptor ring, sq/cq_wait, transfer structs) stays
+ * node-local.  This is a soft affinity hint via set_cpus_allowed_ptr,
+ * not a hard kthread_bind: operators can still override with taskset
+ * to colocate handlers with a specific userspace CPU.  No-op when the
+ * device has no NUMA affinity or the node cpumask is empty.
+ */
+static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
+{
+	const struct cpumask *mask;
+	int node;
+
+	if (!mx_pdev || !mx_pdev->pdev)
+		return;
+
+	node = dev_to_node(&mx_pdev->pdev->dev);
+	if (node == NUMA_NO_NODE)
+		return;
+
+	mask = cpumask_of_node(node);
+	if (cpumask_empty(mask))
+		return;
+
+	/*
+	 * set_cpus_allowed_ptr can fail with -EINVAL (PF_NO_SETAFFINITY) or -EAGAIN (hot-unplug race).
+	 * Warn once so operators get a dmesg breadcrumb when handlers silently aren't pinned to the device-local node —
+	 * the affinity is advisory so we don't fail probe here.
+	 */
+	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread))
+		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->submit_thread, mask));
+	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread))
+		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->complete_thread, mask));
+}
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);

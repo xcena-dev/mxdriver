@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: <SPDX License Expression>
 
 #include <linux/nvme.h>
+#include <linux/sched.h>
 
 #include "mx_dma.h"
 
@@ -54,6 +55,14 @@ struct mx_command {
 	uint64_t size;
 	uint64_t rsvd4;
 } __packed;
+
+/*
+ * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
+ * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
+ * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
+ */
+static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
+	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
 
 struct mx_completion
 {
@@ -210,12 +219,9 @@ static const struct mx_queue_ops v2_queue_ops = {
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
-	}
+	memset(comm, 0, sizeof(*comm));
 
 	comm->opcode = opcode;
 	comm->command_id = transfer->id;
@@ -240,7 +246,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	comm->prp_entry1 = sg_dma_address(sg);
 	if (!comm->prp_entry1) {
 		pr_warn("Failed to get sg_dma_address\n");
-		kfree(comm);
 		return NULL;
 	}
 
@@ -253,14 +258,12 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 			comm->prp_entry2 = sg_dma_address(sg_next(sg));
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
-			kfree(comm);
 			return NULL;
 		}
 	} else {
 		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
-			kfree(comm);
 			return NULL;
 		}
 	}
@@ -455,14 +458,20 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
 		return PTR_ERR(mx_pdev->submit_thread);
 	}
+	/* See core_v1.c: SCHED_FIFO (lowest RT band) for low scheduling latency. */
+	sched_set_fifo_low(mx_pdev->submit_thread);
+
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &io_queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
 		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
 		kthread_stop(mx_pdev->submit_thread);
 		return PTR_ERR(mx_pdev->complete_thread);
 	}
+	sched_set_fifo_low(mx_pdev->complete_thread);
 
 	mx_pdev->io_queue = (struct mx_queue *)io_queue;
+
+	mx_bind_handlers_to_numa(mx_pdev);
 
 	return 0;
 }

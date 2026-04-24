@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: <SPDX License Expression>
 
 #include <linux/atomic.h>
+#include <linux/sched.h>
 
 #include "mx_dma.h"
 
@@ -38,24 +39,41 @@ struct mx_command {
 	};
 };
 
+/*
+ * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
+ * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
+ * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
+ */
+static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
+	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
+
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
 static bool is_pushable(struct mx_queue_v1 *queue)
 {
-	static uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
+	static const uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->sq_mbox;
-	uint32_t free_space;
+
+	/*
+	 * Single-producer contract: mx_submit_handler is the only advancer of mbox->ctx.tail and holds sq_lock here,
+	 * which the assert below enforces under lockdep builds.  Under that contract the cached free_space is a
+	 * conservative lower bound on the true value (head only grows as HW consumes), so when the cache still has
+	 * headroom for another full command we skip the MMIO readq entirely — v1 profile shows is_pushable() readq at
+	 * ~2.8 % of total cycles in tight submit loops.
+	 */
+	lockdep_assert_held(&queue->common.sq_lock);
+
+	if (get_free_space(mbox) >= data_count * 2)
+		return true;
 
 	mbox->ctx.u64 = readq((void *)mbox->r_ctx_addr);
-	free_space = get_free_space(mbox);
-
-	return free_space >= data_count;
+	return get_free_space(mbox) >= data_count;
 }
 
 static bool is_popable(struct mx_queue_v1 *queue)
 {
-	static uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
+	static const uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->cq_mbox;
 	uint32_t pending_count;
 
@@ -91,10 +109,18 @@ static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 	void __iomem *data_addr;
 
 	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->head);
-	memcpy_fromio(comm, data_addr, sizeof(struct mx_command));
 
-	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx da=0x%llx len=%llu\n",
-			ctx->head, comm->id, comm->opcode, comm->host_addr, comm->device_addr, comm->size);
+	/*
+	 * The completion path consumes only the header (id / control) and
+	 * host_addr (result).  size and device_addr are producer-side fields
+	 * unused on the completion side, so skip the extra 2 readq per pop
+	 * (v1 profile shows pop_mx_command memcpy_fromio at ~6.5 % of total).
+	 */
+	comm->header    = readq(data_addr);
+	comm->host_addr = readq(data_addr + offsetof(struct mx_command, host_addr));
+
+	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx\n",
+			ctx->head, comm->id, comm->opcode, comm->host_addr);
 
 	ctx->head = get_next_index(ctx->head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
@@ -154,12 +180,9 @@ static const struct mx_queue_ops v1_queue_ops = {
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
-	}
+	memset(comm, 0, sizeof(*comm));
 
 	comm->magic = MAGIC_COMMAND;
 	comm->id = transfer->id;
@@ -191,7 +214,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		comm->host_addr = sg_dma_address(sg);
 		if (!comm->host_addr) {
 			pr_warn("Failed to get sg_dma_address\n");
-			kfree(comm);
 			return NULL;
 		}
 	} else {
@@ -199,7 +221,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		comm->prp_entry1 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, false);
 		if (!comm->prp_entry1) {
 			pr_warn("Failed to get desc_list_init\n");
-			kfree(comm);
 			return NULL;
 		}
 	}
@@ -235,12 +256,9 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 
 static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopcode)
 {
-	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	if (!comm) {
-		pr_warn("Failed to allocate mx_command for passthru\n");
-		return NULL;
-	}
+	memset(comm, 0, sizeof(*comm));
 
 	comm->magic = MAGIC_COMMAND;
 	comm->opcode = IO_OPCODE_PASSTHRU;
@@ -313,6 +331,14 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
 		return PTR_ERR(mx_pdev->submit_thread);
 	}
+	/*
+	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
+	 * a userspace I/O submission doesn't pay CFS wake latency when the box
+	 * is busy.  Handlers sleep in swait_event_timeout when idle and
+	 * usleep_range in poll_backoff when hardware is unresponsive, so
+	 * softlockup/RCU stalls are not a concern.
+	 */
+	sched_set_fifo_low(mx_pdev->submit_thread);
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
@@ -320,8 +346,11 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 		kthread_stop(mx_pdev->submit_thread);
 		return PTR_ERR(mx_pdev->complete_thread);
 	}
+	sched_set_fifo_low(mx_pdev->complete_thread);
 
 	mx_pdev->io_queue = (struct mx_queue *)queue;
+
+	mx_bind_handlers_to_numa(mx_pdev);
 
 	return 0;
 }
