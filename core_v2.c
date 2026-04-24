@@ -56,6 +56,14 @@ struct mx_command {
 	uint64_t rsvd4;
 } __packed;
 
+/*
+ * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
+ * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
+ * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
+ */
+static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
+	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
+
 struct mx_completion
 {
 	uint64_t result;
@@ -213,7 +221,6 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 {
 	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	BUILD_BUG_ON(sizeof(struct mx_command) > MX_CMD_INLINE_SIZE);
 	memset(comm, 0, sizeof(*comm));
 
 	comm->opcode = opcode;

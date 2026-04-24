@@ -39,6 +39,14 @@ struct mx_command {
 	};
 };
 
+/*
+ * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
+ * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
+ * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
+ */
+static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
+	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
+
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
@@ -48,13 +56,14 @@ static bool is_pushable(struct mx_queue_v1 *queue)
 	struct mx_mbox *mbox = &queue->sq_mbox;
 
 	/*
-	 * Fast path: tail is advanced only by our own push_mx_command and head
-	 * can only grow as HW consumes, so the locally tracked free_space is a
-	 * conservative lower bound on the true value.  If the cache still has
-	 * headroom for another full command even after this one, skip the MMIO
-	 * readq entirely — v1 profile shows is_pushable() readq at ~2.8 % of
-	 * total cycles in tight submit loops.
+	 * Single-producer contract: mx_submit_handler is the only advancer of mbox->ctx.tail and holds sq_lock here,
+	 * which the assert below enforces under lockdep builds.  Under that contract the cached free_space is a
+	 * conservative lower bound on the true value (head only grows as HW consumes), so when the cache still has
+	 * headroom for another full command we skip the MMIO readq entirely — v1 profile shows is_pushable() readq at
+	 * ~2.8 % of total cycles in tight submit loops.
 	 */
+	lockdep_assert_held(&queue->common.sq_lock);
+
 	if (get_free_space(mbox) >= data_count * 2)
 		return true;
 
@@ -64,7 +73,7 @@ static bool is_pushable(struct mx_queue_v1 *queue)
 
 static bool is_popable(struct mx_queue_v1 *queue)
 {
-	static uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
+	static const uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->cq_mbox;
 	uint32_t pending_count;
 
@@ -106,16 +115,12 @@ static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 	 * host_addr (result).  size and device_addr are producer-side fields
 	 * unused on the completion side, so skip the extra 2 readq per pop
 	 * (v1 profile shows pop_mx_command memcpy_fromio at ~6.5 % of total).
-	 * Zero the untouched words so any caller that stringifies them (e.g.
-	 * dev_dbg below) prints 0 instead of stack garbage.
 	 */
-	comm->header      = readq(data_addr);
-	comm->size        = 0;
-	comm->device_addr = 0;
-	comm->host_addr   = readq(data_addr + offsetof(struct mx_command, host_addr));
+	comm->header    = readq(data_addr);
+	comm->host_addr = readq(data_addr + offsetof(struct mx_command, host_addr));
 
-	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx da=0x%llx len=%llu\n",
-			ctx->head, comm->id, comm->opcode, comm->host_addr, comm->device_addr, comm->size);
+	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx\n",
+			ctx->head, comm->id, comm->opcode, comm->host_addr);
 
 	ctx->head = get_next_index(ctx->head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
@@ -177,7 +182,6 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 {
 	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
 
-	BUILD_BUG_ON(sizeof(struct mx_command) > MX_CMD_INLINE_SIZE);
 	memset(comm, 0, sizeof(*comm));
 
 	comm->magic = MAGIC_COMMAND;
@@ -330,8 +334,9 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	/*
 	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
 	 * a userspace I/O submission doesn't pay CFS wake latency when the box
-	 * is busy.  Handlers still yield via cond_resched() and sleep in
-	 * swait_event when idle, so softlockup/RCU stalls are not a concern.
+	 * is busy.  Handlers sleep in swait_event_timeout when idle and
+	 * usleep_range in poll_backoff when hardware is unresponsive, so
+	 * softlockup/RCU stalls are not a concern.
 	 */
 	sched_set_fifo_low(mx_pdev->submit_thread);
 

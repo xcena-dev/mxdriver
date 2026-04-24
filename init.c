@@ -273,14 +273,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
 
-	/*
-	 * Hold a cpu_latency PM QoS for the device's lifetime.  Blocks deep
-	 * C-states whose exit latency would stretch the freq ramp-up window
-	 * that adds ~12 us to cold DMA submissions in our measurements.
-	 * Removed in destroy_mx_pdev (including the out_fail path).
-	 */
-	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req, MX_CPU_LATENCY_QOS_US);
-
 	if (pdev->revision == 0x1) {
 		register_mx_ops_v1(&mx_pdev->ops);
 		pr_info("PCI device revision 1 detected\n");
@@ -291,6 +283,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		pr_err("Unknown PCI device revision %d\n", pdev->revision);
 		return -EINVAL;
 	}
+
+	/*
+	 * Hold a cpu_latency PM QoS for the device's lifetime to block deep C-states whose exit latency would stretch
+	 * the freq ramp-up window that adds ~12 us to cold DMA submissions in our measurements.
+	 * Acquired after ops registration so every failure below can route through out_fail -> destroy_mx_pdev() for
+	 * symmetric cleanup; the unknown-revision early return above must not leak a QoS request.
+	 */
+	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req, MX_CPU_LATENCY_QOS_US);
 
 	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MX_CDEV, MXDMA_NODE_NAME);
 	if (ret) {
@@ -564,8 +564,17 @@ static int mxdma_init(void)
 		return ret;
 	}
 #else
-	bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
-	return 0;
+	{
+		int ret = bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
+
+		if (ret) {
+			pr_err("Failed to register PCI bus notifier (err=%d)\n", ret);
+			kmem_cache_destroy(mx_transfer_cache);
+			mx_transfer_cache = NULL;
+			class_destroy(mxdma_class);
+		}
+		return ret;
+	}
 #endif
 }
 

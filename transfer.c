@@ -46,6 +46,7 @@ static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transf
 	if (transfer->pages && transfer->pages != transfer->pages_inline)
 		kfree(transfer->pages);
 	transfer->pages = NULL;
+	transfer->pages_nr = 0;
 }
 
 static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
@@ -135,6 +136,7 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 		if (transfer->pages != transfer->pages_inline)
 			kfree(transfer->pages);
 		transfer->pages = NULL;
+		transfer->pages_nr = 0;
 		pr_warn("Failed to dma_map_sg\n");
 		return -EIO;
 	}
@@ -204,12 +206,22 @@ fail:
 	return -ENOMEM;
 }
 
-static void release_mx_transfer(struct mx_transfer *transfer)
+/*
+ * Inline-aware free of the hardware command buffer plus the mx_transfer slab entry.
+ * Centralised so release_mx_transfer() and drain_zombie_list() cannot drift on the cmd_inline identity check —
+ * divergence here would be a use-after-free or double-free in a kernel path.
+ */
+static void free_mx_transfer(struct mx_transfer *transfer)
 {
-	transfer_id_free(transfer->id);
 	if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
 		kfree(transfer->command);
 	kmem_cache_free(mx_transfer_cache, transfer);
+}
+
+static void release_mx_transfer(struct mx_transfer *transfer)
+{
+	transfer_id_free(transfer->id);
+	free_mx_transfer(transfer);
 }
 
 static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
@@ -780,9 +792,7 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 			desc_list_free(mx_pdev, transfer);
 		}
 
-		if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
-			kfree(transfer->command);
-		kmem_cache_free(mx_transfer_cache, transfer);
+		free_mx_transfer(transfer);
 	}
 }
 

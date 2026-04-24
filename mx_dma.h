@@ -51,10 +51,9 @@
 #define MX_PAGES_INLINE_NR	1
 
 /*
- * Inline storage for the hardware command struct.  Sized to the larger of
- * the v1 / v2 struct mx_command definitions (v1=32 B, v2=64 B).  Enforced
- * by BUILD_BUG_ON in each core_v*.c; bumping either struct past this limit
- * fails the build instead of silently overrunning.
+ * Inline storage for the hardware command struct.  Sized to the larger of the v1 / v2 struct mx_command definitions
+ * (v1=32 B, v2=64 B).  Enforced by static_assert alongside each struct mx_command definition in core_v1.c /
+ * core_v2.c, so bumping either struct past this limit fails the build instead of silently overrunning.
  */
 #define MX_CMD_INLINE_SIZE	64
 
@@ -378,10 +377,15 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 	if (cpumask_empty(mask))
 		return;
 
+	/*
+	 * set_cpus_allowed_ptr can fail with -EINVAL (PF_NO_SETAFFINITY) or -EAGAIN (hot-unplug race).
+	 * Warn once so operators get a dmesg breadcrumb when handlers silently aren't pinned to the device-local node —
+	 * the affinity is advisory so we don't fail probe here.
+	 */
 	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread))
-		set_cpus_allowed_ptr(mx_pdev->submit_thread, mask);
+		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->submit_thread, mask));
 	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread))
-		set_cpus_allowed_ptr(mx_pdev->complete_thread, mask);
+		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->complete_thread, mask));
 }
 
 void register_mx_ops_v1(struct mx_operations *ops);
