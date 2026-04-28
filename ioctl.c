@@ -218,13 +218,22 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
-	if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
-		mutex_unlock(&sq_mbox->lock);
-		return -EINTR;
-	}
-	sq_mbox->ctx.head = ctx.head;
 
+	/*
+	 * Cached head only lags the real device head (device advances head
+	 * monotonically), so cached_pushable <= real_pushable. Skip the PCIe
+	 * read when the cache already covers the request; fall through otherwise.
+	 */
 	count = get_pushable_count(sq_mbox);
+	if (count < send_cmd.nr_cmds) {
+		if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
+			mutex_unlock(&sq_mbox->lock);
+			return -EINTR;
+		}
+		sq_mbox->ctx.head = ctx.head;
+		count = get_pushable_count(sq_mbox);
+	}
+
 	if (count == 0)
 		goto out;
 
