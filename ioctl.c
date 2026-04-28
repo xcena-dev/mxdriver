@@ -205,7 +205,6 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	struct mx_ioctl_cmds send_cmd;
 	struct mx_mbox *sq_mbox;
-	mbox_context_t ctx;
 	uint64_t data_addr;
 	uint32_t count = 0;
 
@@ -226,6 +225,8 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	 */
 	count = get_pushable_count(sq_mbox);
 	if (count < send_cmd.nr_cmds) {
+		mbox_context_t ctx;
+
 		if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
 			mutex_unlock(&sq_mbox->lock);
 			return -EINTR;
