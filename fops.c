@@ -172,6 +172,43 @@ static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	return ioctl_to_device(mx_pdev, cmd, arg);
 }
 
+static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct mx_char_dev *mx_cdev;
+	struct mx_pci_dev *mx_pdev;
+	int ret;
+	unsigned long vm_size, pfn;
+
+	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	if (ret)
+		return ret;
+
+	if (mx_pdev->pdev->revision != 0x1)
+		return -EOPNOTSUPP;
+
+	/* Direct BAR2 mmap only supports offset 0 full size */
+	if (vma->vm_pgoff != 0)
+		return -EINVAL;
+
+	if (!(vma->vm_flags & VM_SHARED))
+		return -EINVAL;
+
+	vm_size = vma->vm_end - vma->vm_start;
+	if (vm_size != mx_pdev->bar_mapped_size)
+		return -EINVAL;
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#else
+	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
+
+	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
+
+	return io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size, vma->vm_page_prot);
+}
+
 static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 {
 	struct mx_char_dev *mx_cdev;
@@ -243,6 +280,7 @@ struct file_operations mxdma_fops_ioctl = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.unlocked_ioctl = mxdma_device_ioctl,
+	.mmap = mxdma_bar_mmap,
 };
 
 struct file_operations mxdma_fops_event = {
