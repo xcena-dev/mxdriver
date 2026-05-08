@@ -261,7 +261,10 @@ struct mx_pci_dev {
 	bool enabled;
 
 	void __iomem *bar;
-	uint32_t bar_mapped_size;
+	resource_size_t bar_mapped_size;
+
+	struct mutex mmap_lock;
+	struct address_space *mmap_mapping;
 
 	struct mx_operations ops;
 
