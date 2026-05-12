@@ -28,6 +28,13 @@ depmod -a
 # Remove auto-load config
 rm -f /etc/modules-load.d/mx_dma.conf
 
+# Remove load-ordering and initramfs inclusion files
+rm -f /etc/modprobe.d/mx_dma-order.conf
+rm -f /etc/dracut.conf.d/mx_dma.conf
+if [[ -f /etc/initramfs-tools/modules ]]; then
+    sed -i '/^mx_dma$/d' /etc/initramfs-tools/modules
+fi
+
 # Remove CXL udev helpers
 if [[ -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     echo "[INFO] Removing xcena_set_devdax_perm..."
