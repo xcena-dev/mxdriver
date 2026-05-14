@@ -176,15 +176,17 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
+	resource_size_t vm_size;
 	int ret;
-	unsigned long vm_size, pfn;
+	unsigned long pfn;
 
 	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
-	mutex_lock(&mx_pdev->mmap_lock);
+	mutex_lock(&mx_pdev->bar_mmap_lock);
 
+	/* Re-check while locked to close the race with device offline. */
 	if (!mx_pdev->enabled) {
 		ret = -ENODEV;
 		goto out_unlock;
@@ -206,7 +208,7 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 	}
 
 	vm_size = vma->vm_end - vma->vm_start;
-	if ((resource_size_t)vm_size != mx_pdev->bar_mapped_size) {
+	if (vm_size != mx_pdev->bar_mapped_size) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -221,11 +223,16 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size, vma->vm_page_prot);
-	if (!ret)
+	if (!ret) {
+		/*
+		 * All opens of this cdev share inode->i_mapping, so one saved
+		 * address_space is enough to revoke every BAR mapping on remove.
+		 */
 		mx_pdev->mmap_mapping = file->f_mapping;
+	}
 
 out_unlock:
-	mutex_unlock(&mx_pdev->mmap_lock);
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 	return ret;
 }
 

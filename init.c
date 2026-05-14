@@ -221,9 +221,9 @@ static void mxdma_device_offline(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
-	mutex_lock(&mx_pdev->mmap_lock);
+	mutex_lock(&mx_pdev->bar_mmap_lock);
 	mx_pdev->enabled = false;
-	mutex_unlock(&mx_pdev->mmap_lock);
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 }
 
 static void destroy_mx_pdev(struct pci_dev *pdev)
@@ -237,12 +237,12 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
-	mutex_lock(&mx_pdev->mmap_lock);
+	mutex_lock(&mx_pdev->bar_mmap_lock);
 	if (mx_pdev->mmap_mapping) {
 		unmap_mapping_range(mx_pdev->mmap_mapping, 0, 0, 1);
 		mx_pdev->mmap_mapping = NULL;
 	}
-	mutex_unlock(&mx_pdev->mmap_lock);
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
 	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
 		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
@@ -282,7 +282,7 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
-	mutex_init(&mx_pdev->mmap_lock);
+	mutex_init(&mx_pdev->bar_mmap_lock);
 
 	if (pdev->revision == 0x1) {
 		register_mx_ops_v1(&mx_pdev->ops);
