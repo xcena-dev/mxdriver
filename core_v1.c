@@ -361,6 +361,61 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
+			     struct vm_area_struct *vma)
+{
+	resource_size_t vm_size;
+	unsigned long pfn;
+	int ret;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+
+	/* Re-check while locked to close the race with device offline. */
+	if (!mx_pdev->enabled) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	if (vma->vm_pgoff != 0) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (!(vma->vm_flags & VM_SHARED)) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	vm_size = vma->vm_end - vma->vm_start;
+	if (vm_size != mx_pdev->bar_mapped_size) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#else
+	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
+
+	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
+
+	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
+				 vma->vm_page_prot);
+	if (!ret) {
+		/*
+		 * All opens of this cdev share inode->i_mapping, so one saved
+		 * address_space is enough to revoke every BAR mapping on remove.
+		 */
+		mx_pdev->mmap_mapping = vma->vm_file->f_mapping;
+	}
+
+out_unlock:
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	return ret;
+}
+
 void register_mx_ops_v1(struct mx_operations *ops)
 {
 	ops->init_queue =  init_mx_queue;
@@ -368,5 +423,6 @@ void register_mx_ops_v1(struct mx_operations *ops)
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 	ops->create_command_passthru = create_mx_command_passthru;
+	ops->bar_mmap = mxdma_bar_mmap_v1;
 }
 

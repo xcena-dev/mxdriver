@@ -2,6 +2,7 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -250,6 +251,7 @@ struct mx_operations {
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
+	int (*bar_mmap) (struct mx_pci_dev *, struct vm_area_struct *);
 } __randomize_layout;
 
 struct mx_pci_dev {
@@ -261,7 +263,10 @@ struct mx_pci_dev {
 	bool enabled;
 
 	void __iomem *bar;
-	uint32_t bar_mapped_size;
+	resource_size_t bar_mapped_size;
+
+	struct mutex bar_mmap_lock;
+	struct address_space *mmap_mapping;
 
 	struct mx_operations ops;
 

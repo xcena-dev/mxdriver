@@ -172,6 +172,22 @@ static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	return ioctl_to_device(mx_pdev, cmd, arg);
 }
 
+static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct mx_char_dev *mx_cdev;
+	struct mx_pci_dev *mx_pdev;
+	int ret;
+
+	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	if (ret)
+		return ret;
+
+	if (!mx_pdev->ops.bar_mmap)
+		return -EOPNOTSUPP;
+
+	return mx_pdev->ops.bar_mmap(mx_pdev, vma);
+}
+
 static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 {
 	struct mx_char_dev *mx_cdev;
@@ -243,6 +259,7 @@ struct file_operations mxdma_fops_ioctl = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.unlocked_ioctl = mxdma_device_ioctl,
+	.mmap = mxdma_bar_mmap,
 };
 
 struct file_operations mxdma_fops_event = {
