@@ -16,6 +16,8 @@ else
 	mx_dma-objs += trace.o
 	CFLAGS_trace.o := -I$(src)
 	CFLAGS_ioctl.o := -I$(src)
+	CFLAGS_transfer.o := -I$(src)
+	CFLAGS_core_common.o := -I$(src)
 endif
 else
 all:
