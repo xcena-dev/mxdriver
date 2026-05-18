@@ -6,148 +6,163 @@ unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
 unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
+/*
+ * Split threshold as a percentage of a single PRP descriptor list's
+ * descriptor capacity (descs_per_list = page_size / sizeof(u64) = 128 on
+ * v1, 512 on v2).
+ *
+ *     0 (default): legacy page-based split — one split per host page,
+ *                  capped at parallel_count.  Matches pre-refactor split
+ *                  semantics (pin/map sharing still active).
+ *   100         : one split per full descriptor list — no chaining at
+ *                  the boundary, fewest splits.
+ *    50         : split every descs_per_list/2 descriptors (twice as
+ *                  many splits as 100).
+ *   200         : allow each split to chain across two descriptor lists
+ *                  (half as many splits, more HW chain traversal).
+ */
+unsigned int parallel_split_ratio;
+module_param(parallel_split_ratio, uint, 0644);
 unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
 module_param(zombie_grace_ms, int, 0644);
 
 /******************************************************************************/
-/* Functions for DMA                                                          */
+/* Shared SG context (pin + dma_map_sg done once, shared across sub-transfers) */
 /******************************************************************************/
-static void unmap_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
+static void mx_sg_context_release(struct mx_sg_context *ctx)
 {
-	struct sg_table *sgt = &transfer->sgt;
+	struct device *dev = &ctx->mx_pdev->pdev->dev;
+	struct sg_table *sgt = &ctx->sgt;
 	int i;
 
 	if (sgt->nents)
-		dma_unmap_sg(dev, sgt->sgl, sgt->nents, transfer->dir);
+		dma_unmap_sg(dev, sgt->sgl, sgt->nents, ctx->dir);
 
-	if (transfer->dir != DMA_TO_DEVICE) {
-		for (i = 0; i < transfer->pages_nr; i++) {
-			struct page *page = transfer->pages[i];
+	if (ctx->dir != DMA_TO_DEVICE) {
+		for (i = 0; i < ctx->pages_nr; i++) {
+			struct page *page = ctx->pages[i];
 			if (!page)
 				break;
 			set_page_dirty_lock(page);
 		}
 	}
 
-	if (transfer->pages_nr > 0)
-		unpin_user_pages(transfer->pages, transfer->pages_nr);
+	if (ctx->pages_nr > 0)
+		unpin_user_pages(ctx->pages, ctx->pages_nr);
 
-	/*
-	 * Inline SG (sg_inline[]) is embedded in mx_transfer — calling
-	 * sg_free_table() on it would kfree a static array.  Only free the
-	 * table when sg_alloc_table_from_pages() backed the sgl.
-	 */
-	if (sgt->sgl && sgt->sgl != transfer->sg_inline)
+	if (sgt->sgl && sgt->sgl != ctx->sg_inline)
 		sg_free_table(sgt);
-	sgt->sgl = NULL;
-	sgt->nents = 0;
-	sgt->orig_nents = 0;
 
-	if (transfer->pages && transfer->pages != transfer->pages_inline)
-		kfree(transfer->pages);
-	transfer->pages = NULL;
-	transfer->pages_nr = 0;
+	if (ctx->pages && ctx->pages != ctx->pages_inline)
+		kfree(ctx->pages);
+
+	kfree(ctx);
 }
 
-static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
+static void mx_sg_context_put(struct mx_sg_context *ctx)
 {
-	struct sg_table *sgt = &transfer->sgt;
-	void __user *user_addr = transfer->user_addr;
-	size_t size = transfer->size;
-	unsigned int pages_nr;
-	unsigned int offset;
-	unsigned int gup_flags = 0;
+	if (!ctx)
+		return;
+	if (atomic_dec_and_test(&ctx->refcount))
+		mx_sg_context_release(ctx);
+}
+
+static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
+{
+	atomic_inc(&ctx->refcount);
+	return ctx;
+}
+
+/*
+ * Create a shared SG mapping for a user buffer.  Pins pages and runs
+ * dma_map_sg once; sub-transfers later attach by mx_sg_context_get() and
+ * detach via mx_sg_context_put().  The caller holds the initial reference
+ * (refcount=1) and must release it (via put or transfer attach + put).
+ *
+ * Cleanup on failure routes through mx_sg_context_put() so that whatever
+ * partial state has been built (pages array, pinned pages, sg table) is
+ * torn down by the regular release path — no per-error unwind branches.
+ */
+static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
+		void __user *user_addr, size_t total_size, enum dma_data_direction dir)
+{
+	struct mx_sg_context *ctx;
+	struct sg_table *sgt;
+	unsigned int pages_nr, offset, gup_flags = 0;
 	long pinned;
 	int ret;
 
 	offset = offset_in_page((unsigned long)user_addr);
-	pages_nr = DIV_ROUND_UP(offset + size, PAGE_SIZE);
+	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
 	if (!pages_nr)
-		return 0;
+		return NULL;
 
-	/*
-	 * Fast path: single-page transfers reuse the inline array embedded in
-	 * mx_transfer.  Only the >MX_PAGES_INLINE_NR case hits the allocator.
-	 */
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		pr_warn("Failed to alloc mx_sg_context\n");
+		return NULL;
+	}
+
+	atomic_set(&ctx->refcount, 1);
+	ctx->mx_pdev = mx_pdev;
+	ctx->dir = dir;
+	ctx->user_addr = user_addr;
+	ctx->total_size = total_size;
+	sgt = &ctx->sgt;
+
 	if (pages_nr <= MX_PAGES_INLINE_NR) {
-		transfer->pages = transfer->pages_inline;
+		ctx->pages = ctx->pages_inline;
 	} else {
-		transfer->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
-		if (!transfer->pages) {
+		ctx->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
+		if (!ctx->pages) {
 			pr_warn("Failed to alloc pages\n");
-			return -ENOMEM;
+			goto err;
 		}
 	}
 
-	/* Pin user_addr to pages */
-	if (transfer->dir == DMA_FROM_DEVICE || transfer->dir == DMA_BIDIRECTIONAL)
+	if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL)
 		gup_flags |= FOLL_WRITE;
 
-	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, transfer->pages);
-	if (pinned < 0) {
-		pr_warn("pin_user_pages_fast failed (err=%ld)\n", pinned);
-		if (transfer->pages != transfer->pages_inline)
-			kfree(transfer->pages);
-		transfer->pages = NULL;
-		return (int)pinned;
-	}
+	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, ctx->pages);
+	if (pinned > 0)
+		ctx->pages_nr = pinned; /* tracked so release can unpin */
 	if (pinned != pages_nr) {
-		pr_warn("pin_user_pages_fast partial (req=%u, got=%ld)\n", pages_nr, pinned);
-		if (pinned > 0)
-			unpin_user_pages(transfer->pages, pinned);
-		if (transfer->pages != transfer->pages_inline)
-			kfree(transfer->pages);
-		transfer->pages = NULL;
-		return -EFAULT;
+		pr_warn("pin_user_pages_fast %s (req=%u, got=%ld)\n",
+				pinned < 0 ? "failed" : "partial", pages_nr, pinned);
+		goto err;
 	}
-	transfer->pages_nr = pages_nr;
 
 	if (pages_nr <= MX_PAGES_INLINE_NR) {
-		/*
-		 * Hand-build a single-entry sg_table using the inline scatterlist.
-		 * Skipping sg_alloc_table_from_pages() saves its internal kmalloc
-		 * plus the dynamic sgl free path in unmap_user_addr_to_sg().
-		 */
-		sg_init_table(transfer->sg_inline, MX_PAGES_INLINE_NR);
-		sg_set_page(&transfer->sg_inline[0], transfer->pages[0], size, offset);
-		sgt->sgl = transfer->sg_inline;
+		/* Hand-build single-entry sg_table on the inline scatterlist. */
+		sg_init_table(ctx->sg_inline, MX_PAGES_INLINE_NR);
+		sg_set_page(&ctx->sg_inline[0], ctx->pages[0], total_size, offset);
+		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
-		sgt->nents = pages_nr;
 	} else {
-		ret = sg_alloc_table_from_pages(sgt, transfer->pages, pages_nr, offset, size, GFP_KERNEL);
+		ret = sg_alloc_table_from_pages(sgt, ctx->pages, pages_nr, offset, total_size, GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
-			unpin_user_pages(transfer->pages, transfer->pages_nr);
-			if (transfer->pages != transfer->pages_inline)
-				kfree(transfer->pages);
-			transfer->pages = NULL;
-			transfer->pages_nr = 0;
-			return ret;
+			goto err;
 		}
 	}
 
-	/* Map the given buffer for DMA */
-	sgt->nents = dma_map_sg(dev, sgt->sgl, sgt->orig_nents, transfer->dir);
+	sgt->nents = dma_map_sg(&mx_pdev->pdev->dev, sgt->sgl, sgt->orig_nents, dir);
 	if (!sgt->nents) {
-		if (sgt->sgl != transfer->sg_inline)
-			sg_free_table(sgt);
-		sgt->sgl = NULL;
-		unpin_user_pages(transfer->pages, transfer->pages_nr);
-		if (transfer->pages != transfer->pages_inline)
-			kfree(transfer->pages);
-		transfer->pages = NULL;
-		transfer->pages_nr = 0;
 		pr_warn("Failed to dma_map_sg\n");
-		return -EIO;
+		goto err;
 	}
 
-	return 0;
+	return ctx;
+
+err:
+	mx_sg_context_put(ctx);
+	return NULL;
 }
 
 /******************************************************************************/
 /* MX Transfer                                                                */
 /******************************************************************************/
-static void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	int i;
 
@@ -220,19 +235,21 @@ static void free_mx_transfer(struct mx_transfer *transfer)
 
 static void release_mx_transfer(struct mx_transfer *transfer)
 {
+	if (transfer->sg_ctx)
+		mx_sg_context_put(transfer->sg_ctx);
 	transfer_id_free(transfer->id);
 	free_mx_transfer(transfer);
 }
 
-static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
-		enum dma_data_direction dir)
+/* Base allocator — used directly by ctrl / passthru paths (no SG mapping). */
+static struct mx_transfer *alloc_mx_transfer(void __user *user_addr, size_t size,
+		uint64_t device_addr, enum dma_data_direction dir)
 {
 	struct mx_transfer *transfer;
 
 	transfer = kmem_cache_zalloc(mx_transfer_cache, GFP_KERNEL);
-	if (!transfer) {
+	if (!transfer)
 		return NULL;
-	}
 
 	INIT_LIST_HEAD(&transfer->entry);
 	INIT_LIST_HEAD(&transfer->zombie_entry);
@@ -254,15 +271,52 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 	return transfer;
 }
 
-static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t total_size,
-		uint64_t device_addr, enum dma_data_direction dir, int pages_nr, int count)
+/*
+ * SG sub-transfer — attaches to an existing shared sg_context.  Takes one
+ * reference on sg_ctx; released when the transfer finishes (via destroy_sg
+ * or release_mx_transfer).
+ */
+static struct mx_transfer *alloc_mx_transfer_sg(struct mx_sg_context *sg_ctx,
+		size_t byte_offset, size_t slice_size, uint64_t device_addr)
 {
-	struct mx_transfer **transfer;
+	struct mx_transfer *transfer;
+	void __user *slice_addr = (void __user *)((uintptr_t)sg_ctx->user_addr + byte_offset);
+	unsigned int offset = offset_in_page((unsigned long)slice_addr);
+
+	transfer = alloc_mx_transfer(slice_addr, slice_size, device_addr, sg_ctx->dir);
+	if (!transfer)
+		return NULL;
+
+	transfer->sg_ctx = mx_sg_context_get(sg_ctx);
+	transfer->sg_byte_offset = byte_offset;
+	transfer->sub_pages_nr = DIV_ROUND_UP(offset + slice_size, PAGE_SIZE);
+
+	return transfer;
+}
+
+/*
+ * Build an array of `count` sub-transfers, all sharing a single sg_context.
+ * Caller owns the sg_context's initial reference and must put() it after
+ * this returns; once dropped, the context lifetime is governed solely by
+ * the sub-transfers.
+ *
+ * Splits are aligned to page boundaries except for the head (which inherits
+ * the user buffer's intra-page offset) and the tail (which absorbs the
+ * trailing partial page if any).
+ */
+static struct mx_transfer **alloc_mx_transfers(struct mx_sg_context *sg_ctx,
+		uint64_t device_addr_base, int count)
+{
+	struct mx_transfer **transfers;
+	void __user *cursor = sg_ctx->user_addr;
+	size_t remaining = sg_ctx->total_size;
+	uint64_t device_addr = device_addr_base;
+	int pages_nr = sg_ctx->pages_nr;
 	int q, r;
 	int i;
 
-	transfer = kcalloc(count, sizeof(struct mx_transfer *), GFP_KERNEL);
-	if (!transfer) {
+	transfers = kcalloc(count, sizeof(struct mx_transfer *), GFP_KERNEL);
+	if (!transfers) {
 		pr_warn("Failed to alloc parallel mx_transfer\n");
 		return NULL;
 	}
@@ -272,27 +326,28 @@ static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t to
 
 	for (i = 0; i < count; i++) {
 		int num = (r-- > 0) ? q + 1 : q;
-		uint64_t end_addr = ((uint64_t)user_addr + num * PAGE_SIZE) & PAGE_MASK;
-		size_t size = min_t(size_t, end_addr - (uint64_t)user_addr, total_size);
+		uintptr_t end_addr = ((uintptr_t)cursor + (uintptr_t)num * PAGE_SIZE) & PAGE_MASK;
+		size_t slice = min_t(size_t, end_addr - (uintptr_t)cursor, remaining);
+		size_t byte_offset = (uintptr_t)cursor - (uintptr_t)sg_ctx->user_addr;
 
-		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir);
-		if (!transfer[i]) {
+		transfers[i] = alloc_mx_transfer_sg(sg_ctx, byte_offset, slice, device_addr);
+		if (!transfers[i]) {
 			pr_warn("Failed to alloc mx_transfer[%d]\n", i);
 			goto fail;
 		}
-		user_addr = (void __user *)((uint64_t)user_addr + size);
-		total_size -= size;
-		device_addr += size;
+		cursor = (void __user *)((uintptr_t)cursor + slice);
+		remaining -= slice;
+		device_addr += slice;
 	}
 
-	return transfer;
+	return transfers;
 
 fail:
 	for (i = 0; i < count; i++) {
-		if (transfer[i])
-			release_mx_transfer(transfer[i]);
+		if (transfers[i])
+			release_mx_transfer(transfers[i]);
 	}
-	kfree(transfer);
+	kfree(transfers);
 	return NULL;
 }
 
@@ -416,17 +471,9 @@ static void mx_transfer_wait_work(struct work_struct *work)
 
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
-	int ret;
-
-	ret = map_user_addr_to_sg(dev, transfer);
-	if (ret)
-		return ret;
-
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
 	if (!transfer->command) {
 		pr_warn("Failed to create_command_sg (id=%u)\n", transfer->id);
-		unmap_user_addr_to_sg(dev, transfer);
 		return -ENOMEM;
 	}
 
@@ -439,14 +486,11 @@ static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
-
-	unmap_user_addr_to_sg(dev, transfer);
 	desc_list_free(mx_pdev, transfer);
-	release_mx_transfer(transfer);
+	release_mx_transfer(transfer); /* drops sg_ctx reference */
 }
 
-static ssize_t mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer *transfer, int opcode, bool nowait)
 {
 	size_t size = transfer->size;
@@ -511,6 +555,46 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 	return transferred;
 }
 
+/*
+ * Submit a (possibly split) SG data transfer.  Always wraps the buffer in a
+ * shared sg_context; when count==1 we still go through the shared mapping
+ * so single and parallel paths share the same destroy/zombie semantics.
+ */
+static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
+		void __user *buf, size_t size, uint64_t device_addr,
+		enum dma_data_direction dir, int opcode, int count, bool nowait)
+{
+	struct mx_sg_context *sg_ctx;
+	struct mx_transfer **transfers;
+	ssize_t ret;
+
+	sg_ctx = mx_sg_context_create(mx_pdev, buf, size, dir);
+	if (!sg_ctx)
+		return -ENOMEM;
+
+	if (count == 1) {
+		struct mx_transfer *transfer;
+
+		transfer = alloc_mx_transfer_sg(sg_ctx, 0, size, device_addr);
+		mx_sg_context_put(sg_ctx); /* drop creator ref; transfer owns one now */
+		if (!transfer) {
+			pr_warn("Failed to alloc mx_transfer\n");
+			return -ENOMEM;
+		}
+		return mx_transfer_submit_sg_one(mx_pdev, transfer, opcode, nowait);
+	}
+
+	transfers = alloc_mx_transfers(sg_ctx, device_addr, count);
+	mx_sg_context_put(sg_ctx); /* drop creator ref; subs own their refs */
+	if (!transfers) {
+		pr_warn("Failed to alloc parallel mx_transfers (count=%d)\n", count);
+		return -ENOMEM;
+	}
+
+	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
+	return ret;
+}
+
 static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_ctrl(transfer, opcode);
@@ -568,80 +652,81 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 /******************************************************************************/
 /* Functions for fops                                                         */
 /******************************************************************************/
+
+/*
+ * Decide how many transfers to split a buffer into.
+ *
+ * parallel_split_ratio == 0: legacy page-based split — count = nr_pages
+ * spanned by the buffer, capped at parallel_count.  Matches pre-refactor
+ * (main) behaviour for A/B comparison.
+ *
+ * parallel_split_ratio > 0: descriptor-based split.  One transfer is the
+ * unit that fits in descs_per_split descriptors of a single PRP list:
+ *   dma_size       = mx_pdev->page_size   (PRP entry granularity)
+ *   descs_per_list = dma_size / sizeof(u64)        (v1: 128, v2: 512)
+ *   descs_per_split = descs_per_list × parallel_split_ratio / 100
+ *   total_descs     = ceil(size / dma_size)
+ *   count           = ceil(total_descs / descs_per_split)
+ * Caps at parallel_count to match HW DMA engine count.
+ */
+static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, size_t size)
+{
+	size_t dma_size;
+	int descs_per_list, descs_per_split;
+	int total_descs;
+	int count;
+
+	if (parallel_split_ratio == 0) {
+		uintptr_t first_page = (uintptr_t)buf >> PAGE_SHIFT;
+		uintptr_t last_page = ((uintptr_t)buf + size - 1) >> PAGE_SHIFT;
+		int nr_pages = (int)(last_page - first_page + 1);
+
+		return min_t(int, nr_pages, parallel_count);
+	}
+
+	dma_size = mx_pdev->page_size;
+	descs_per_list = (int)(dma_size / sizeof(uint64_t));
+	descs_per_split = descs_per_list * parallel_split_ratio / 100;
+	if (descs_per_split < 1)
+		descs_per_split = 1;
+
+	total_descs = (int)DIV_ROUND_UP(size, dma_size);
+	count = DIV_ROUND_UP(total_descs, descs_per_split);
+	if (count < 1)
+		count = 1;
+	return min_t(int, count, parallel_count);
+}
+
 ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
 		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
-	struct mx_transfer *transfer;
-
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
-	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer for read\n");
-		return -ENOMEM;
-	}
-
-	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
+	return mx_transfer_submit_sg_split(mx_pdev, user_addr, size, *fpos,
+			DMA_FROM_DEVICE, opcode, 1, false);
 }
 
 ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
 		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
-	struct mx_transfer *transfer;
-
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
-	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer for write\n");
-		return -ENOMEM;
-	}
-
-	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, nowait);
+	return mx_transfer_submit_sg_split(mx_pdev, (void __user *)user_addr, size, *fpos,
+			DMA_TO_DEVICE, opcode, 1, nowait);
 }
 
 ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
-	struct mx_transfer **transfers;
-	uint64_t first_page_index, last_page_index;
-	int nr_pages, count;
+	int count = mx_parallel_count_for(mx_pdev, buf, size);
 
-	first_page_index = (uint64_t)buf >> PAGE_SHIFT;
-	last_page_index = ((uint64_t)buf + size - 1) >> PAGE_SHIFT;
-	nr_pages = last_page_index - first_page_index + 1;
-	count = min_t(int, nr_pages, parallel_count);
-
-	if (count == 1)
-		return read_data_from_device(mx_pdev, buf, size, fpos, opcode);
-
-	transfers = alloc_mx_transfers(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count);
-	if (!transfers) {
-		pr_warn("Failed to alloc parallel mx_transfers for read (count=%d)\n", count);
-		return -ENOMEM;
-	}
-
-	return mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, false);
+	return mx_transfer_submit_sg_split(mx_pdev, buf, size, *fpos,
+			DMA_FROM_DEVICE, opcode, count, false);
 }
 
 ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
-	struct mx_transfer **transfers;
-	uint64_t first_page_index, last_page_index;
-	int nr_pages, count;
+	int count = mx_parallel_count_for(mx_pdev, (void __user *)buf, size);
 
-	first_page_index = (uint64_t)buf >> PAGE_SHIFT;
-	last_page_index = ((uint64_t)buf + size - 1) >> PAGE_SHIFT;
-	nr_pages = last_page_index - first_page_index + 1;
-	count = min_t(int, nr_pages, parallel_count);
-
-	if (count == 1)
-		return write_data_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
-
-	transfers = alloc_mx_transfers((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count);
-	if (!transfers) {
-		pr_warn("Failed to alloc parallel mx_transfers for write (count=%d)\n", count);
-		return -ENOMEM;
-	}
-
-	return mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
+	return mx_transfer_submit_sg_split(mx_pdev, (void __user *)buf, size, *fpos,
+			DMA_TO_DEVICE, opcode, count, nowait);
 }
 
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
@@ -663,7 +748,7 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 {
 	struct mx_transfer *transfer;
 
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
+	transfer = alloc_mx_transfer((void __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer for write_ctrl\n");
 		return -ENOMEM;
@@ -677,19 +762,14 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 /******************************************************************************/
 ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode)
 {
-	struct mx_transfer *transfer;
-
 	/*
 	 * HIO Send/Recv both perform H2D and D2H on the same host buffer:
 	 *   Send: H2D(full buffer) -> firmware -> D2H(status in command page)
 	 *   Recv: H2D(command page) -> firmware -> D2H(response in full buffer)
-	 * DMA_BIDIRECTIONAL is required.
+	 * DMA_BIDIRECTIONAL is required.  Treated as a single transfer (no split).
 	 */
-	transfer = alloc_mx_transfer(buf, size, 0, DMA_BIDIRECTIONAL);
-	if (!transfer)
-		return -ENOMEM;
-
-	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
+	return mx_transfer_submit_sg_split(mx_pdev, buf, size, 0,
+			DMA_BIDIRECTIONAL, opcode, 1, false);
 }
 
 /******************************************************************************/
@@ -785,14 +865,16 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 		atomic_dec(&mx_pdev->io_queue->zombie_wait_count);
 
 		cancel_work_sync(&transfer->work);
-		transfer_id_free(transfer->id);
 
-		if (transfer->is_sg) {
-			unmap_user_addr_to_sg(&mx_pdev->pdev->dev, transfer);
+		if (transfer->is_sg)
 			desc_list_free(mx_pdev, transfer);
-		}
 
-		free_mx_transfer(transfer);
+		/*
+		 * release_mx_transfer drops the sg_context reference (if any),
+		 * frees the IDR id and the slab entry.  Last sub on an sg_context
+		 * triggers dma_unmap_sg + unpin_user_pages on its put().
+		 */
+		release_mx_transfer(transfer);
 	}
 }
 

@@ -156,9 +156,41 @@ struct mx_mbox {
 	struct mutex lock;
 };
 
+/*
+ * Shared scatter-gather mapping for parallel data transfers.
+ *
+ * One sg_context covers a single user buffer (pinned pages + DMA mapping).
+ * When a request is split into multiple parallel sub-transfers, all subs
+ * share the same sg_context — pin_user_pages_fast / dma_map_sg happen once,
+ * amortising what used to be N× host setup over the N HW engines.
+ *
+ * Each sub-transfer holds one refcount.  The mapping is torn down when the
+ * last sub releases its reference (mx_sg_context_put → refcount reaches 0).
+ */
+struct mx_sg_context {
+	atomic_t refcount;
+	struct mx_pci_dev *mx_pdev;
+	enum dma_data_direction dir;
+	void __user *user_addr;
+	size_t total_size;
+
+	struct sg_table sgt;
+	struct page **pages;
+	int pages_nr;
+
+	/*
+	 * Inline fast-path storage.  Active when pages_nr <= MX_PAGES_INLINE_NR
+	 * (single-page transfers).  Free paths detect inline use by pointer
+	 * identity (pages == pages_inline, sgt.sgl == sg_inline) and skip the
+	 * corresponding kfree / sg_free_table.
+	 */
+	struct page		*pages_inline[MX_PAGES_INLINE_NR];
+	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
+};
+
 struct mx_transfer {
 	int id;
-	void __user *user_addr;
+	void __user *user_addr;		/* slice start (ctrl/passthru) or sg_ctx->user_addr + sg_byte_offset for SG */
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
@@ -182,22 +214,20 @@ struct mx_transfer {
 	unsigned long zombie_timestamp;
 	struct list_head zombie_entry;
 
-	/* Used for data transfer */
-	struct sg_table sgt;
-	struct page **pages;
-	int pages_nr;
+	/* SG slice: only valid when is_sg=true; NULL for ctrl/passthru. */
+	struct mx_sg_context *sg_ctx;
+	size_t sg_byte_offset;		/* byte offset into sg_ctx->sgt for this sub */
+	int sub_pages_nr;		/* host pages spanned by this sub's slice */
+
+	/* Per-sub HW descriptor list (each engine gets its own PRP chain). */
 	int desc_list_cnt;
 	void **desc_list_va;
 	dma_addr_t *desc_list_ba;
 
 	/*
-	 * Inline fast-path storage.  Active when pages_nr <= MX_PAGES_INLINE_NR.
-	 * Free paths detect inline use by pointer identity
-	 * (pages == pages_inline, sgt.sgl == sg_inline, command == cmd_inline)
-	 * and skip the corresponding kfree / sg_free_table.
+	 * Inline command storage.  Free paths detect inline use by pointer
+	 * identity (command == cmd_inline) and skip kfree.
 	 */
-	struct page		*pages_inline[MX_PAGES_INLINE_NR];
-	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
 	uint8_t			 cmd_inline[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
@@ -332,12 +362,32 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
+void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
 int mx_get_list_count(int total_desc_cnt, int descs_per_list);
-int mx_get_total_desc_count(struct sg_table *sgt, size_t dma_size, bool skip_first);
+int mx_get_total_desc_count(struct sg_table *sgt, size_t byte_offset, size_t byte_size,
+			    size_t dma_size, bool skip_first);
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 			   size_t dma_size, int descs_per_list, bool skip_first_entry);
+
+/*
+ * Locate the scatterlist entry containing byte_offset within sgt's DMA mapping.
+ * On return: *out_sg points to the entry and *out_intra is the byte offset
+ * inside that entry (0 if byte_offset lands exactly on an entry boundary).
+ * Returns 0 on success, -EINVAL if byte_offset is past the mapping.
+ */
+int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
+		 struct scatterlist **out_sg, size_t *out_intra);
+
+/*
+ * First-chunk length when emitting PRP entries within an SG entry starting
+ * at intra_off bytes in.  Truncates the leading chunk to align subsequent
+ * chunks on dma_size boundaries inside the physical page.  Returns dma_size
+ * when already aligned.  Shared by core_v1 / core_v2 fast paths.
+ */
+size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
+
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);

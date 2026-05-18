@@ -234,8 +234,10 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
-	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
+	struct sg_table *sgt = &transfer->sg_ctx->sgt;
+	struct scatterlist *sg = NULL;
+	size_t intra_off = 0;
+	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
@@ -243,19 +245,29 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		return NULL;
 	}
 
-	comm->prp_entry1 = sg_dma_address(sg);
+	ret = mx_sg_locate(sgt, transfer->sg_byte_offset, &sg, &intra_off);
+	if (ret) {
+		pr_warn("Failed to locate sg slice (id=%u)\n", transfer->id);
+		return NULL;
+	}
+
+	comm->prp_entry1 = sg_dma_address(sg) + intra_off;
 	if (!comm->prp_entry1) {
 		pr_warn("Failed to get sg_dma_address\n");
 		return NULL;
 	}
 
-	if (transfer->pages_nr == 1) {
+	if (transfer->sub_pages_nr == 1) {
 		comm->prp_entry2 = 0;
-	} else if (transfer->pages_nr == 2) {
-		if (sg_dma_len(sg) + sg->offset > SINGLE_DMA_SIZE)
-			comm->prp_entry2 = (comm->prp_entry1 + SINGLE_DMA_SIZE) - sg->offset;
+	} else if (transfer->sub_pages_nr == 2) {
+		size_t first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
+
+		/* Second PRP entry points to the page after the first chunk. */
+		if (intra_off + first_len < sg_dma_len(sg))
+			comm->prp_entry2 = comm->prp_entry1 + first_len;
 		else
 			comm->prp_entry2 = sg_dma_address(sg_next(sg));
+
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
 			return NULL;
