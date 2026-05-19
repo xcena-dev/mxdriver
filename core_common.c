@@ -17,38 +17,106 @@ int mx_get_list_count(int total_desc_cnt, int descs_per_list)
 	return list_cnt;
 }
 
-int mx_get_total_desc_count(struct sg_table *sgt, size_t dma_size,
-			    bool skip_first)
+/* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the offset into the
+ * found entry.  Returns 0 on hit, -EINVAL if byte_offset >= sum(sg_dma_len).  byte_offset must
+ * be strictly less than the total mapped length — callers handle zero-length slices upstream. */
+int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
+		 struct scatterlist **out_sg, size_t *out_intra)
 {
-	struct scatterlist *sg = sgt->sgl;
-	int total_desc_cnt = 0;
+	struct scatterlist *sg;
+	size_t acc = 0;
 	int i;
 
 	for_each_sgtable_dma_sg(sgt, sg, i) {
-		int len = sg_dma_len(sg);
-		int desc_cnt = (len + dma_size - 1) / dma_size;
+		size_t dlen = sg_dma_len(sg);
 
-		total_desc_cnt += desc_cnt;
+		if (acc + dlen > byte_offset) {
+			*out_sg = sg;
+			*out_intra = byte_offset - acc;
+			return 0;
+		}
+		acc += dlen;
 	}
 
-	if (skip_first)
-		total_desc_cnt--;
+	*out_sg = NULL;
+	*out_intra = 0;
+	return -EINVAL;
+}
 
-	return total_desc_cnt;
+/* First PRP chunk length within an SG entry starting at intra_off; truncates so subsequent chunks
+ * land on dma_size boundaries.  Returns dma_size when already aligned.  Works for arbitrary
+ * dma_size (compiler folds the modulo to a bitmask when dma_size is a known power of 2). */
+size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
+{
+	size_t off_in_page = (sg->offset + intra_off) & (PAGE_SIZE - 1);
+	size_t rem = off_in_page % dma_size;
+
+	return rem ? (dma_size - rem) : dma_size;
+}
+
+/* Count PRP descriptors needed for byte_size bytes starting at (sg, intra_off); caller must
+ * pre-locate via mx_sg_locate.  skip_first subtracts one (when caller stashes the first DMA
+ * address inline in prp_entry1).  sg/intra_off are by-value so caller's walking state survives. */
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
+			    size_t byte_size, size_t dma_size, bool skip_first)
+{
+	size_t remaining = byte_size;
+	int total = 0;
+
+	if (byte_size == 0)
+		return 0;
+
+	while (remaining > 0 && sg) {
+		size_t avail = sg_dma_len(sg) - intra_off;
+		size_t consumed = min(avail, remaining);
+		size_t first_len = mx_prp_first_chunk_len(sg, intra_off, dma_size);
+
+		first_len = min(first_len, consumed);
+		total += 1;
+		if (consumed > first_len)
+			total += DIV_ROUND_UP(consumed - first_len, dma_size);
+
+		remaining -= consumed;
+		if (remaining == 0)
+			break;
+
+		sg = sg_next(sg);
+		intra_off = 0;
+	}
+
+	if (skip_first && total > 0)
+		total--;
+
+	return total;
 }
 
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			   struct mx_transfer *transfer, size_t dma_size,
 			   int descs_per_list, bool skip_first_entry)
 {
-	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
+	struct sg_table *sgt = &transfer->sg_ctx->sgt;
+	size_t byte_offset = transfer->sg_byte_offset;
+	size_t remaining = transfer->size;
+	struct scatterlist *sg = NULL;
+	size_t intra_off = 0;
+	dma_addr_t dma_addr;
+	size_t entry_avail;
+	size_t len;
 	uint64_t *desc;
 	int total_desc_cnt, list_cnt, list_idx, desc_idx;
 	int ret;
-	int i;
 
-	total_desc_cnt = mx_get_total_desc_count(sgt, dma_size, skip_first_entry);
+	ret = mx_sg_locate(sgt, byte_offset, &sg, &intra_off);
+	if (ret) {
+		pr_warn("Failed to locate sg slice (byte_offset=%zu)\n", byte_offset);
+		return 0;
+	}
+
+	total_desc_cnt = mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
+	if (total_desc_cnt <= 0) {
+		pr_warn("desc count <= 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
+		return 0;
+	}
 	list_cnt = mx_get_list_count(total_desc_cnt, descs_per_list);
 	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
@@ -60,37 +128,56 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	desc_idx = 0;
 	desc = (uint64_t *)transfer->desc_list_va[list_idx];
 
-	for_each_sgtable_dma_sg(sgt, sg, i) {
-		dma_addr_t dma_addr = sg_dma_address(sg);
-		ssize_t dma_len = sg_dma_len(sg);
-		ssize_t offset = sg->offset;
-		ssize_t len = dma_size;
+	dma_addr = sg_dma_address(sg) + intra_off;
+	entry_avail = sg_dma_len(sg) - intra_off;
+	len = mx_prp_first_chunk_len(sg, intra_off, dma_size);
+	len = min3(len, entry_avail, remaining);
 
-		if (offset) {
-			ssize_t tmp = (PAGE_SIZE - offset) & (dma_size - 1);
-			if (tmp != 0)
-				len = tmp;
-		}
-
-		if (skip_first_entry && i == 0) {
-			dma_addr += len;
-			dma_len -= len;
-			len = min_t(ssize_t, dma_len, dma_size);
-		}
-
-		while (dma_len > 0) {
-			if (desc_idx == descs_per_list - 1 && total_desc_cnt > 1) {
-				desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
-				desc = (uint64_t *)transfer->desc_list_va[list_idx];
-				desc_idx = 0;
+	if (skip_first_entry) {
+		/* First slot lives in command.prp_entry{1,2}; advance past it. */
+		dma_addr += len;
+		entry_avail -= len;
+		remaining -= len;
+		if (entry_avail == 0 && remaining > 0) {
+			sg = sg_next(sg);
+			if (!sg) {
+				pr_warn("sg_next NULL after skip_first\n");
+				desc_list_free(mx_pdev, transfer);
+				return 0;
 			}
-
-			desc[desc_idx++] = dma_addr;
-			dma_addr += len;
-			dma_len -= len;
-			len = min_t(ssize_t, dma_len, dma_size);
-			total_desc_cnt--;
+			dma_addr = sg_dma_address(sg);
+			entry_avail = sg_dma_len(sg);
 		}
+		len = min3((size_t)dma_size, entry_avail, remaining);
+	}
+
+	while (remaining > 0) {
+		if (desc_idx == descs_per_list - 1 && total_desc_cnt > 1) {
+			desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
+			desc = (uint64_t *)transfer->desc_list_va[list_idx];
+			desc_idx = 0;
+		}
+
+		desc[desc_idx++] = dma_addr;
+		dma_addr += len;
+		entry_avail -= len;
+		remaining -= len;
+		total_desc_cnt--;
+
+		if (remaining == 0)
+			break;
+
+		if (entry_avail == 0) {
+			sg = sg_next(sg);
+			if (!sg) {
+				pr_warn("sg_next NULL mid-walk (remaining=%zu)\n", remaining);
+				desc_list_free(mx_pdev, transfer);
+				return 0;
+			}
+			dma_addr = sg_dma_address(sg);
+			entry_avail = sg_dma_len(sg);
+		}
+		len = min3((size_t)dma_size, entry_avail, remaining);
 	}
 
 	return transfer->desc_list_ba[0];
