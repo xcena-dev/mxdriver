@@ -153,6 +153,11 @@ static int set_dma_addressing(struct pci_dev *pdev)
 		return -EINVAL;
 	}
 
+	/* scatterlist::dma_length is unsigned int — a single coalesced DMA segment
+	 * exactly at 4 GiB wraps to 0 and breaks length-based SG walks (e.g.
+	 * mx_sg_locate).  Cap so dma_map_sg never produces a 32-bit-overflowing entry. */
+	dma_set_max_seg_size(&pdev->dev, 1u << 30);
+
 	return 0;
 }
 
