@@ -3,12 +3,17 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   review:
-    uses: xcena-dev/.github/.github/workflows/claude-review.yml@main
+    if: github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request && (startsWith(github.event.comment.body, '/claude-review') || startsWith(github.event.comment.body, '/cr')) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    uses: xcena-dev/.github/.github/workflows/claude-pr-review-command.yml@main
     with:
+      pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
+      review_request: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
       model: "claude-opus-4-6"
       additional_prompt: |
         You are a specialist reviewer for Linux kernel modules and CXL device drivers.
