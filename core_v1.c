@@ -196,9 +196,11 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
-	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
-	unsigned int size;
+	struct sg_table *sgt = &transfer->sg_ctx->sgt;
+	struct scatterlist *sg = NULL;
+	size_t intra_off = 0;
+	size_t first_len;
+	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
@@ -206,12 +208,17 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		return NULL;
 	}
 
-	size = (PAGE_SIZE - sg->offset) % SINGLE_DMA_SIZE;
-	size = size ? size : SINGLE_DMA_SIZE;
+	ret = mx_sg_locate(sgt, transfer->sg_byte_offset, &sg, &intra_off);
+	if (ret) {
+		pr_warn("Failed to locate sg slice (id=%u)\n", transfer->id);
+		return NULL;
+	}
 
-	if (transfer->size <= size) {
+	first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
+
+	if (transfer->size <= first_len) {
 		comm->page_mode = MXDMA_PAGE_MODE_SINGLE;
-		comm->host_addr = sg_dma_address(sg);
+		comm->host_addr = sg_dma_address(sg) + intra_off;
 		if (!comm->host_addr) {
 			pr_warn("Failed to get sg_dma_address\n");
 			return NULL;

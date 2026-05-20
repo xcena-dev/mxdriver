@@ -15,6 +15,7 @@
 #include <linux/numa.h>
 #include <linux/pm_qos.h>
 #include <linux/poll.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/scatterlist.h>
 #include <linux/swait.h>
@@ -156,9 +157,33 @@ struct mx_mbox {
 	struct mutex lock;
 };
 
+/*
+ * Shared SG mapping for parallel data transfers.  One sg_context per user buffer (pinned pages +
+ * dma_map_sg run once); each split-transfer takes one refcount and the last put() tears it down.
+ * Assumes cache-coherent DMA (x86/CXL); non-coherent platforms would need per-split dma_sync_sg_*.
+ */
+struct mx_sg_context {
+	refcount_t refcount;
+	struct mx_pci_dev *mx_pdev;
+	enum dma_data_direction dir;
+	void __user *user_addr;
+	size_t total_size;
+
+	struct sg_table sgt;
+	struct page **pages;
+	int pages_nr;
+
+	/*
+	 * Inline fast-path: when pages_nr <= MX_PAGES_INLINE_NR (single-page transfers) pages and
+	 * sgt.sgl point into these arrays; free paths detect inline use by pointer identity.
+	 */
+	struct page		*pages_inline[MX_PAGES_INLINE_NR];
+	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
+};
+
 struct mx_transfer {
 	int id;
-	void __user *user_addr;
+	void __user *user_addr;		/* ctrl/passthru target; NULL for SG transfers */
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
@@ -182,22 +207,19 @@ struct mx_transfer {
 	unsigned long zombie_timestamp;
 	struct list_head zombie_entry;
 
-	/* Used for data transfer */
-	struct sg_table sgt;
-	struct page **pages;
-	int pages_nr;
+	/* SG slice: only valid when is_sg=true; NULL for ctrl/passthru. */
+	struct mx_sg_context *sg_ctx;
+	size_t sg_byte_offset;		/* byte offset into sg_ctx->sgt for this split */
+
+	/* Per-split HW descriptor list (each engine gets its own PRP chain). */
 	int desc_list_cnt;
 	void **desc_list_va;
 	dma_addr_t *desc_list_ba;
 
 	/*
-	 * Inline fast-path storage.  Active when pages_nr <= MX_PAGES_INLINE_NR.
-	 * Free paths detect inline use by pointer identity
-	 * (pages == pages_inline, sgt.sgl == sg_inline, command == cmd_inline)
-	 * and skip the corresponding kfree / sg_free_table.
+	 * Inline command storage.  Free paths detect inline use by pointer
+	 * identity (command == cmd_inline) and skip kfree.
 	 */
-	struct page		*pages_inline[MX_PAGES_INLINE_NR];
-	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
 	uint8_t			 cmd_inline[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
@@ -332,12 +354,24 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
+void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
 int mx_get_list_count(int total_desc_cnt, int descs_per_list);
-int mx_get_total_desc_count(struct sg_table *sgt, size_t dma_size, bool skip_first);
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			    size_t dma_size, bool skip_first);
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 			   size_t dma_size, int descs_per_list, bool skip_first_entry);
+
+/* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the byte offset into
+ * that entry.  Returns 0 on hit, -EINVAL if byte_offset is past the mapping.  See core_common.c. */
+int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
+		 struct scatterlist **out_sg, size_t *out_intra);
+
+/* First PRP chunk length when starting intra_off bytes into an SG entry; truncates so subsequent
+ * chunks land on dma_size boundaries.  Returns dma_size when already aligned.  See core_common.c. */
+size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
+
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
