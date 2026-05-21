@@ -44,7 +44,7 @@ static void mx_sg_context_release(struct mx_sg_context *ctx)
 		sg_free_table(sgt);
 
 	if (ctx->pages && ctx->pages != ctx->pages_inline)
-		kfree(ctx->pages);
+		kvfree(ctx->pages);
 
 	kfree(ctx);
 }
@@ -98,7 +98,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	if (pages_nr <= MX_PAGES_INLINE_NR) {
 		ctx->pages = ctx->pages_inline;
 	} else {
-		ctx->pages = kcalloc(pages_nr, sizeof(struct page *), GFP_KERNEL);
+		/* kvmalloc_array: vmalloc fallback past KMALLOC_MAX_SIZE.  Pages array is walked,
+		 * not DMA'd, so physical contiguity is unneeded — removes the ~2 GB per-ioctl cap. */
+		ctx->pages = kvmalloc_array(pages_nr, sizeof(struct page *), GFP_KERNEL | __GFP_ZERO);
 		if (!ctx->pages) {
 			pr_warn("Failed to alloc pages\n");
 			ret = -ENOMEM;
