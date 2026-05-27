@@ -2,6 +2,14 @@
 
 #include "mx_dma.h"
 
+#ifndef MX_DMA_DISABLE_TRACE
+#include "trace.h"
+#else
+#define trace_mx_dma_xfer_submit(xfer_id, no_completion)			do { } while (0)
+#define trace_mx_dma_xfer_complete(xfer_id, status, result, is_zombie)		do { } while (0)
+#define trace_mx_dma_xfer_complete_orphan(xfer_id, status, result)		do { } while (0)
+#endif
+
 /******************************************************************************/
 /* Descriptor list utilities                                                  */
 /******************************************************************************/
@@ -264,6 +272,8 @@ int mx_submit_handler(void *arg)
 			list_del_init(&transfer->entry);
 			pushed_any = true;
 
+			trace_mx_dma_xfer_submit((u32)transfer->id, transfer->no_completion);
+
 			if (transfer->no_completion) {
 				/*
 				 * HW guarantees no completion entry for passthru
@@ -314,10 +324,14 @@ int mx_complete_handler(void *arg)
 
 			transfer = find_transfer_by_id(info.id);
 			if (!transfer) {
+				trace_mx_dma_xfer_complete_orphan((u32)info.id, info.status, info.result);
 				dev_warn_ratelimited(q->dev,
 					"Completion for unknown transfer (id=%d)\n", info.id);
 				continue;
 			}
+
+			trace_mx_dma_xfer_complete((u32)info.id, info.status, info.result,
+					READ_ONCE(transfer->is_zombie));
 
 			/*
 			 * Claim wait_count decrement — prevents double decrement

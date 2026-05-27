@@ -10,6 +10,15 @@ ifneq ($(KERNELRELEASE),)
 ifeq ($(WO_CXL),1)
 	EXTRA_CFLAGS += -DCONFIG_WO_CXL
 endif
+ifeq ($(MX_DMA_DISABLE_TRACE),1)
+	EXTRA_CFLAGS += -DMX_DMA_DISABLE_TRACE
+else
+	mx_dma-objs += trace.o
+	CFLAGS_trace.o := -I$(src)
+	CFLAGS_ioctl.o := -I$(src)
+	CFLAGS_transfer.o := -I$(src)
+	CFLAGS_core_common.o := -I$(src)
+endif
 else
 all:
 	$(MAKE) -C $(BUILDSYSTEM_DIR) M=$(PWD) modules

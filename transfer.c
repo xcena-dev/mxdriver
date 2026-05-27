@@ -2,6 +2,28 @@
 
 #include "mx_dma.h"
 
+#ifndef MX_DMA_DISABLE_TRACE
+#include "trace.h"
+#else
+#define trace_mx_dma_xfer_enqueue(dev_id, xfer_id, op, dir, sz, sg, pi, pc)	do { } while (0)
+#define trace_mx_dma_xfer_wait_exit(dev_id, xfer_id, ret, state)		do { } while (0)
+#endif
+
+/* mx_transfer_wait terminal state. Keep in sync with mx_dma_wait_state_names
+ * in trace.h. */
+enum mx_dma_wait_state {
+	MX_DMA_WAIT_COMPLETED		= 0,
+	MX_DMA_WAIT_RECOVERED		= 1,
+	MX_DMA_WAIT_LATE_COMPLETED	= 2,
+	MX_DMA_WAIT_ZOMBIE		= 3,
+};
+
+/* Keep MX_DMA_WAIT_* in sync with mx_dma_wait_state_names in trace.h. */
+static_assert(MX_DMA_WAIT_COMPLETED      == 0, "trace wait_state names out of sync");
+static_assert(MX_DMA_WAIT_RECOVERED      == 1, "trace wait_state names out of sync");
+static_assert(MX_DMA_WAIT_LATE_COMPLETED == 2, "trace wait_state names out of sync");
+static_assert(MX_DMA_WAIT_ZOMBIE         == 3, "trace wait_state names out of sync");
+
 unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
 unsigned int parallel_count = 6;
@@ -382,6 +404,10 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 {
 	unsigned long left_time;
 	ssize_t size;
+	ssize_t ret;
+	int state;
+	/* Capture id up-front: destroy/release below frees the transfer. */
+	u32 __maybe_unused xfer_id = (u32)transfer->id;
 
 	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 	if ((long)left_time <= 0) {
@@ -399,7 +425,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				mx_transfer_destroy_sg(mx_pdev, transfer);
 			else
 				release_mx_transfer(transfer);
-			return 0;
+			ret = 0;
+			state = MX_DMA_WAIT_RECOVERED;
+			goto out;
 		}
 
 		/*
@@ -416,7 +444,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				mx_transfer_destroy_sg(mx_pdev, transfer);
 			else
 				mx_transfer_destroy_ctrl(transfer);
-			return size;
+			ret = size;
+			state = MX_DMA_WAIT_LATE_COMPLETED;
+			goto out;
 		}
 
 		pr_warn("mx_dma: interrupted transfer did not complete within 1s (id=%u), marking zombie\n",
@@ -431,7 +461,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
 		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
 
-		return 0;
+		ret = 0;
+		state = MX_DMA_WAIT_ZOMBIE;
+		goto out;
 	}
 
 	size = transfer->size;
@@ -441,7 +473,11 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	else
 		mx_transfer_destroy_ctrl(transfer);
 
-	return size;
+	ret = size;
+	state = MX_DMA_WAIT_COMPLETED;
+out:
+	trace_mx_dma_xfer_wait_exit(mx_pdev->dev_id, xfer_id, ret, state);
+	return ret;
 }
 
 static void mx_transfer_wait_work(struct work_struct *work)
@@ -485,6 +521,8 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 		return ret;
 	}
 
+	trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfer->id, opcode,
+			transfer->dir, transfer->size, true, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
 		schedule_work(&transfer->work);
@@ -521,6 +559,10 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		kfree(transfers);
 		return ret;
 	}
+
+	for (i = 0; i < count; i++)
+		trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfers[i]->id, opcode,
+				transfers[i]->dir, transfers[i]->size, true, i, count);
 
 	mx_transfer_queue_parallel(mx_pdev->io_queue, transfers, count);
 
@@ -623,6 +665,8 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 		return ret;
 	}
 
+	trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfer->id, opcode,
+			transfer->dir, transfer->size, false, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
 		schedule_work(&transfer->work);
@@ -784,6 +828,8 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 	transfer->is_sg = false;
 	transfer->no_completion = no_completion;
 
+	trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfer->id, IO_OPCODE_PASSTHRU,
+			transfer->dir, transfer->size, false, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 
 	if (no_completion) {
