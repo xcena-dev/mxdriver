@@ -402,6 +402,10 @@ static long ioctl_read_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (read_data.size == 0 || !read_data.user_addr)
 		return -EINVAL;
 
+	pr_info("mxdbg: ioctl_read_data dev_no=%d uva=0x%lx off_in_page=%lu size=%zu dev_addr=0x%llx\n",
+			mx_pdev->dev_no, (unsigned long)read_data.user_addr,
+			(unsigned long)read_data.user_addr & ~PAGE_MASK, read_data.size, read_data.device_addr);
+
 	ret = read_data_from_device_parallel(mx_pdev, (char __user *)read_data.user_addr, read_data.size,
 			(loff_t *)&read_data.device_addr, IO_OPCODE_DATA_READ);
 	if (ret < 0)
@@ -420,6 +424,11 @@ static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	if (write_data.size == 0 || !write_data.user_addr)
 		return -EINVAL;
+
+	pr_info("mxdbg: ioctl_write_data dev_no=%d uva=0x%lx off_in_page=%lu size=%zu dev_addr=0x%llx no_wait=%d\n",
+			mx_pdev->dev_no, (unsigned long)write_data.user_addr,
+			(unsigned long)write_data.user_addr & ~PAGE_MASK, write_data.size,
+			write_data.device_addr, write_data.no_wait);
 
 	ret = write_data_to_device_parallel(mx_pdev, (const char __user *)write_data.user_addr, write_data.size,
 			(loff_t *)&write_data.device_addr, IO_OPCODE_DATA_WRITE, write_data.no_wait);

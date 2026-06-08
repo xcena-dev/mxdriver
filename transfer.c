@@ -104,6 +104,10 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	if (!pages_nr)
 		return ERR_PTR(-EINVAL);
 
+	pr_info("mxdbg: sg_create uva=0x%lx off_in_page=%u size=%zu pages_nr=%u dir=%d inline=%d\n",
+			(unsigned long)user_addr, offset, total_size, pages_nr, dir,
+			pages_nr <= MX_PAGES_INLINE_NR);
+
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
 		pr_warn("Failed to alloc mx_sg_context\n");
@@ -124,7 +128,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		 * not DMA'd, so physical contiguity is unneeded — removes the ~2 GB per-ioctl cap. */
 		ctx->pages = kvmalloc_array(pages_nr, sizeof(struct page *), GFP_KERNEL | __GFP_ZERO);
 		if (!ctx->pages) {
-			pr_warn("Failed to alloc pages\n");
+			pr_warn("mxdbg: Failed to alloc pages (pages_nr=%u, array_bytes=%zu, uva=0x%lx size=%zu dir=%d)\n",
+					pages_nr, (size_t)pages_nr * sizeof(struct page *),
+					(unsigned long)user_addr, total_size, dir);
 			ret = -ENOMEM;
 			goto err;
 		}
@@ -140,7 +146,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		const char *kind = pinned < 0 ? "failed" :
 				   pinned == 0 ? "none" : "partial";
 
-		pr_warn("pin_user_pages_fast %s (req=%u, got=%ld)\n", kind, pages_nr, pinned);
+		pr_warn("pin_user_pages_fast %s (req=%u, got=%ld, uva=0x%lx off_in_page=%u size=%zu dir=%d gup_flags=0x%x)\n",
+				kind, pages_nr, pinned, (unsigned long)user_addr, offset,
+				total_size, dir, gup_flags);
 		ret = (pinned < 0) ? (int)pinned : -EFAULT;
 		goto err;
 	}
@@ -154,14 +162,16 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	} else {
 		ret = sg_alloc_table_from_pages(sgt, ctx->pages, pages_nr, offset, total_size, GFP_KERNEL);
 		if (ret) {
-			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
+			pr_warn("mxdbg: sg_alloc_table_from_pages failed (err=%d, pages_nr=%u, uva=0x%lx off_in_page=%u size=%zu dir=%d)\n",
+					ret, pages_nr, (unsigned long)user_addr, offset, total_size, dir);
 			goto err;
 		}
 	}
 
 	sgt->nents = dma_map_sg(&mx_pdev->pdev->dev, sgt->sgl, sgt->orig_nents, dir);
 	if (!sgt->nents) {
-		pr_warn("Failed to dma_map_sg\n");
+		pr_warn("mxdbg: Failed to dma_map_sg (pages_nr=%u, orig_nents=%u, uva=0x%lx off_in_page=%u size=%zu dir=%d)\n",
+				pages_nr, sgt->orig_nents, (unsigned long)user_addr, offset, total_size, dir);
 		ret = -EIO;
 		goto err;
 	}
@@ -593,9 +603,16 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer **transfers;
 	ssize_t ret;
 
+	pr_info("mxdbg: submit_sg_split uva=0x%lx off_in_page=%lu size=%zu dev_addr=0x%llx dir=%d op=%d count=%d nowait=%d\n",
+			(unsigned long)buf, (unsigned long)buf & ~PAGE_MASK, size,
+			(unsigned long long)device_addr, dir, opcode, count, nowait);
+
 	sg_ctx = mx_sg_context_create(mx_pdev, buf, size, dir);
-	if (IS_ERR(sg_ctx))
+	if (IS_ERR(sg_ctx)) {
+		pr_warn("mxdbg: submit_sg_split sg_context_create failed err=%ld (uva=0x%lx size=%zu dir=%d)\n",
+				PTR_ERR(sg_ctx), (unsigned long)buf, size, dir);
 		return PTR_ERR(sg_ctx);
+	}
 
 	if (count == 1) {
 		struct mx_transfer *transfer;
@@ -745,6 +762,10 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 {
 	int count = mx_parallel_count_for(mx_pdev, buf, size);
 
+	pr_info("mxdbg: read_parallel uva=0x%lx off_in_page=%lu size=%zu dev_addr=0x%llx split_count=%d\n",
+			(unsigned long)buf, (unsigned long)buf & ~PAGE_MASK, size,
+			(unsigned long long)*fpos, count);
+
 	return mx_transfer_submit_sg_split(mx_pdev, buf, size, *fpos,
 			DMA_FROM_DEVICE, opcode, count, false);
 }
@@ -753,6 +774,10 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	int count = mx_parallel_count_for(mx_pdev, (void __user *)buf, size);
+
+	pr_info("mxdbg: write_parallel uva=0x%lx off_in_page=%lu size=%zu dev_addr=0x%llx split_count=%d nowait=%d\n",
+			(unsigned long)buf, (unsigned long)buf & ~PAGE_MASK, size,
+			(unsigned long long)*fpos, count, nowait);
 
 	return mx_transfer_submit_sg_split(mx_pdev, (void __user *)buf, size, *fpos,
 			DMA_TO_DEVICE, opcode, count, nowait);

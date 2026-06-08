@@ -92,6 +92,9 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 	if (ret)
 		return ret;
 
+	pr_info("mxdbg: cdev_read_data dev_no=%d uva=0x%lx off_in_page=%lu count=%zu pos=%lld\n",
+			mx_pdev->dev_no, (unsigned long)buf, (unsigned long)buf & ~PAGE_MASK, count, *pos);
+
 	mx_prewake_handlers(mx_pdev);
 	return read_data_from_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_READ);
 }
@@ -134,6 +137,9 @@ static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf
 	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
+
+	pr_info("mxdbg: cdev_write_data dev_no=%d uva=0x%lx off_in_page=%lu count=%zu pos=%lld\n",
+			mx_pdev->dev_no, (unsigned long)buf, (unsigned long)buf & ~PAGE_MASK, count, *pos);
 
 	mx_prewake_handlers(mx_pdev);
 	return write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
