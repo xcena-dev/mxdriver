@@ -201,6 +201,15 @@ static void v2_post_complete(struct mx_queue *q)
 	ring_cq_doorbell(queue);
 }
 
+static void build_ping_command_v2(void *cmd)
+{
+	struct mx_command *comm = (struct mx_command *)cmd;
+
+	memset(comm, 0, sizeof(*comm));
+	comm->opcode = IO_OPCODE_PING;
+	comm->command_id = MX_PING_ID;
+}
+
 static const struct mx_queue_ops v2_queue_ops = {
 	.is_pushable	= v2_is_pushable,
 	.push_command	= v2_push_command,
@@ -208,6 +217,7 @@ static const struct mx_queue_ops v2_queue_ops = {
 	.is_popable	= v2_is_popable,
 	.pop_completion	= v2_pop_completion,
 	.post_complete	= v2_post_complete,
+	.build_ping_command = build_ping_command_v2,
 };
 
 /******************************************************************************/
@@ -478,6 +488,8 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	init_swait_queue_head(&io_queue->common.cq_wait);
 	atomic_set(&io_queue->common.wait_count, 0);
 	atomic_set(&io_queue->common.zombie_wait_count, 0);
+	atomic_set(&io_queue->common.lv_health, MX_LIVENESS_ALIVE);
+	io_queue->common.lv_progress_jiffies = jiffies;
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &io_queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {

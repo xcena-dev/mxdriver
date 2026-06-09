@@ -162,6 +162,16 @@ static void v1_pop_completion(struct mx_queue *q, struct mx_completion_info *inf
 	info->status  = comm.control;
 }
 
+static void build_ping_command_v1(void *cmd)
+{
+	struct mx_command *comm = (struct mx_command *)cmd;
+
+	memset(comm, 0, sizeof(*comm));
+	comm->magic = MAGIC_COMMAND;
+	comm->id = MX_PING_ID;
+	comm->opcode = IO_OPCODE_PING;
+}
+
 static const struct mx_queue_ops v1_queue_ops = {
 	.is_pushable	= v1_is_pushable,
 	.push_command	= v1_push_command,
@@ -169,6 +179,7 @@ static const struct mx_queue_ops v1_queue_ops = {
 	.is_popable	= v1_is_popable,
 	.pop_completion	= v1_pop_completion,
 	.post_complete	= NULL,
+	.build_ping_command = build_ping_command_v1,
 };
 
 /******************************************************************************/
@@ -332,6 +343,8 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	init_swait_queue_head(&queue->common.cq_wait);
 	atomic_set(&queue->common.wait_count, 0);
 	atomic_set(&queue->common.zombie_wait_count, 0);
+	atomic_set(&queue->common.lv_health, MX_LIVENESS_ALIVE);
+	queue->common.lv_progress_jiffies = jiffies;
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {
