@@ -408,6 +408,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	int state;
 	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
+	/* Sanitize sysfs-writable params: >=1 ceiling multiplier, and a non-zero
+	 * chunk so the wait below never degenerates into a busy-spin. */
+	unsigned int mult = liveness_enable ? max(liveness_max_mult, 1u) : 1;
 
 	{
 		/*
@@ -416,9 +419,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		 * ceiling of timeout_ms * liveness_max_mult — which also caps a transfer the device silently
 		 * dropped while still answering other commands.
 		 */
-		unsigned int chunk_ms = liveness_enable ? min(liveness_stall_ms, timeout_ms) : timeout_ms;
+		unsigned int chunk_ms = liveness_enable ? max(min(liveness_stall_ms, timeout_ms), 1u) : timeout_ms;
 		unsigned long hard_deadline =
-			jiffies + msecs_to_jiffies(timeout_ms) * (liveness_enable ? liveness_max_mult : 1);
+			jiffies + msecs_to_jiffies(timeout_ms) * mult;
 
 		do {
 			left_time = wait_for_completion_interruptible_timeout(&transfer->done,
@@ -444,9 +447,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				pr_warn("transfer failed: transport DEAD (id=%u, size=%#llx, dir=%u)\n",
 						transfer->id, (uint64_t)transfer->size, transfer->dir);
 			else
-				pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, ceiling=%u ms)\n",
+				pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, ceiling=%lu ms)\n",
 						transfer->id, (uint64_t)transfer->size, transfer->dir,
-						timeout_ms * (liveness_enable ? liveness_max_mult : 1));
+						(unsigned long)timeout_ms * mult);
 		}
 		else
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",

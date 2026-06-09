@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/scatterlist.h>
 #include <linux/swait.h>
+#include <linux/timekeeping.h>
 #include <linux/topology.h>
 
 #include <asm/current.h>
@@ -281,7 +282,7 @@ struct mx_queue {
 	/* Transport liveness watchdog (io_queue only) */
 	atomic_t lv_health;		/* enum mx_liveness_health */
 	atomic_t lv_inflight;		/* 0/1: a watchdog ping is outstanding */
-	unsigned long lv_sent_jiffies;	/* when the current ping was pushed */
+	u64 lv_sent_ns;			/* when the current ping was pushed (dead-budget + RTT) */
 	unsigned long lv_progress_jiffies; /* last completion, or batch start */
 	u64 lv_rtt_ns;
 	uint8_t lv_ping_cmd[MX_CMD_INLINE_SIZE] __aligned(8);

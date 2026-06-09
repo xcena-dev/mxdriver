@@ -19,7 +19,7 @@ unsigned int liveness_dead_ms = 5000;
 module_param(liveness_dead_ms, uint, 0644);
 unsigned int liveness_max_mult = 10;
 module_param(liveness_max_mult, uint, 0644);
-MODULE_PARM_DESC(liveness_max_mult, "Absolute wait ceiling = timeout_ms * this while transport stays alive");
+MODULE_PARM_DESC(liveness_max_mult, "Absolute wait ceiling = timeout_ms * this (clamped >=1) while transport stays alive");
 
 /******************************************************************************/
 /* Descriptor list utilities                                                  */
@@ -268,6 +268,10 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 {
 	unsigned long now = jiffies;
 	int outstanding = atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
+	/* Snapshot + sanitize sysfs-writable params: keep 1 <= stall < dead so a probe
+	 * is always attempted before the no-completion DEAD verdict fires. */
+	unsigned int dead_ms = max(liveness_dead_ms, 2u);
+	unsigned int stall_ms = clamp(liveness_stall_ms, 1u, dead_ms - 1);
 	unsigned long stalled_ms;
 
 	if (outstanding <= 0)
@@ -277,24 +281,24 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 
 	/* No completion for too long: dead. Covers the SQ-stuck case where the
 	 * probe below cannot even be pushed (fetch path wedged). */
-	if (stalled_ms > liveness_dead_ms)
+	if (stalled_ms > dead_ms)
 		atomic_set(&q->lv_health, MX_LIVENESS_DEAD);
 
 	/* Probe: stalled past threshold, queue has room, no probe in flight. */
-	if (stalled_ms > liveness_stall_ms && atomic_read(&q->lv_inflight) == 0 &&
+	if (stalled_ms > stall_ms && atomic_read(&q->lv_inflight) == 0 &&
 	    q->ops->is_pushable(q) &&
 	    atomic_cmpxchg(&q->lv_inflight, 0, 1) == 0) {
 		/* Verifying: downgrade ALIVE->UNKNOWN until the pong (or any
 		 * completion) resolves it; leaves DEAD untouched. */
 		atomic_cmpxchg(&q->lv_health, MX_LIVENESS_ALIVE, MX_LIVENESS_SUSPECT);
-		WRITE_ONCE(q->lv_sent_jiffies, now);
+		WRITE_ONCE(q->lv_sent_ns, ktime_get_ns());
 		q->ops->build_ping_command(q->lv_ping_cmd);
 		q->ops->push_command(q, q->lv_ping_cmd);
 	}
 
 	/* Probe outstanding with no pong past the dead budget: dead. */
 	if (atomic_read(&q->lv_inflight) &&
-	    jiffies_to_msecs(now - READ_ONCE(q->lv_sent_jiffies)) > liveness_dead_ms)
+	    ktime_get_ns() - READ_ONCE(q->lv_sent_ns) > (u64)dead_ms * NSEC_PER_MSEC)
 		atomic_set(&q->lv_health, MX_LIVENESS_DEAD);
 }
 
@@ -378,7 +382,9 @@ int mx_complete_handler(void *arg)
 			popped_any = true;
 			ops->pop_completion(q, &info);
 
-			/* Any completion proves the transport responded. */
+			/* Unconditional by design (not gated on liveness_enable): keeps
+			 * lv_progress/lv_health warm so a sysfs enable at boot won't see a
+			 * stale timestamp and falsely declare DEAD on the first tick. */
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 			atomic_set(&q->lv_health, MX_LIVENESS_ALIVE);
 			if (info.id == MX_PING_ID) {
@@ -386,7 +392,7 @@ int mx_complete_handler(void *arg)
 				 * a normal completion may have resolved it first. */
 				if (atomic_xchg(&q->lv_inflight, 0) == 1)
 					WRITE_ONCE(q->lv_rtt_ns,
-						   jiffies_to_nsecs(jiffies - READ_ONCE(q->lv_sent_jiffies)));
+						   ktime_get_ns() - READ_ONCE(q->lv_sent_ns));
 				continue;
 			}
 			/* Any normal completion also ends the verify window — resume held submits. */

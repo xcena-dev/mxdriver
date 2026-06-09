@@ -138,7 +138,7 @@ struct mx_ioctl_liveness
 #define MX_IOCTL_PASSTHRU_CMD		_IOWR(MX_IOCTL_MAGIC, 8, struct mx_ioctl_passthru_cmd)
 #define MX_IOCTL_HIO_SEND		_IOW(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
 #define MX_IOCTL_HIO_RECV		_IOW(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
-#define MX_IOCTL_GET_LIVENESS		_IOWR(MX_IOCTL_MAGIC, 11, struct mx_ioctl_liveness)
+#define MX_IOCTL_GET_LIVENESS		_IOR(MX_IOCTL_MAGIC, 11, struct mx_ioctl_liveness)
 
 /* MX_IOCTL_* indices must match mx_dma_ioctl_nr_names in trace.h AND both switches in
  * ioctl_to_device (setup-only early-return + main dispatch).  Boundary asserts catch
