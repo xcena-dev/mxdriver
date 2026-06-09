@@ -47,7 +47,8 @@
 	{ 7,  "WRITE_DATA"         },	\
 	{ 8,  "PASSTHRU_CMD"       },	\
 	{ 9,  "HIO_SEND"           },	\
-	{ 10, "HIO_RECV"           }
+	{ 10, "HIO_RECV"           },	\
+	{ 11, "GET_LIVENESS"       }
 
 /* --- ioctl entry / exit --- */
 
