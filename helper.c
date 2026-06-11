@@ -10,7 +10,7 @@ int transfer_id_alloc(void *ptr)
 	int id;
 
 	spin_lock(&id_lock);
-	id = idr_alloc_cyclic(&mx_ids, ptr, 0, (1 << 16), GFP_KERNEL);
+	id = idr_alloc_cyclic(&mx_ids, ptr, 0, MX_PING_ID, GFP_KERNEL);
 	spin_unlock(&id_lock);
 
 	return id;

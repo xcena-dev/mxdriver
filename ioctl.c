@@ -120,6 +120,13 @@ struct mx_ioctl_protocol_cmd
 	size_t size;
 };
 
+struct mx_ioctl_liveness
+{
+	uint32_t capability;	/* 0 = liveness disabled or FW unsupported */
+	uint32_t health;	/* enum mx_liveness_health */
+	uint64_t rtt_ns;	/* last watchdog round-trip, valid when ALIVE */
+};
+
 #define MX_IOCTL_MAGIC			'X'
 #define MX_IOCTL_REGISTER_MBOX		_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
 #define MX_IOCTL_INIT_MBOX		_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
@@ -131,12 +138,14 @@ struct mx_ioctl_protocol_cmd
 #define MX_IOCTL_PASSTHRU_CMD		_IOWR(MX_IOCTL_MAGIC, 8, struct mx_ioctl_passthru_cmd)
 #define MX_IOCTL_HIO_SEND		_IOW(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
 #define MX_IOCTL_HIO_RECV		_IOW(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
+#define MX_IOCTL_GET_LIVENESS		_IOR(MX_IOCTL_MAGIC, 11, struct mx_ioctl_liveness)
 
 /* MX_IOCTL_* indices must match mx_dma_ioctl_nr_names in trace.h AND both switches in
  * ioctl_to_device (setup-only early-return + main dispatch).  Boundary asserts catch
  * reorderings, removals, and additions that shift the last NR. */
 static_assert(_IOC_NR(MX_IOCTL_REGISTER_MBOX) == 1,  "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 static_assert(_IOC_NR(MX_IOCTL_HIO_RECV)      == 10, "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
+static_assert(_IOC_NR(MX_IOCTL_GET_LIVENESS)  == 11, "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
@@ -465,6 +474,25 @@ static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, in
 	return submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
 }
 
+static long ioctl_get_liveness(struct mx_pci_dev *mx_pdev, unsigned long arg)
+{
+	struct mx_ioctl_liveness out = {};
+	struct mx_queue *q = mx_pdev->io_queue;
+
+	if (!liveness_enable || !q) {
+		out.capability = 0;
+		out.health = MX_LIVENESS_UNKNOWN;
+	} else {
+		out.capability = 1;
+		out.health = atomic_read(&q->lv_health);
+		out.rtt_ns = READ_ONCE(q->lv_rtt_ns);
+	}
+
+	if (copy_to_user((void __user *)arg, &out, sizeof(out)))
+		return -EFAULT;
+	return 0;
+}
+
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
 {
 	long ret;
@@ -503,6 +531,9 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 		break;
 	case MX_IOCTL_HIO_RECV:
 		ret = ioctl_hio_protocol(mx_pdev, arg, IO_OPCODE_RECV);
+		break;
+	case MX_IOCTL_GET_LIVENESS:
+		ret = ioctl_get_liveness(mx_pdev, arg);
 		break;
 	default:
 		pr_warn("unknown ioctl cmd(%u)\n", cmd);

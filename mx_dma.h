@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/scatterlist.h>
 #include <linux/swait.h>
+#include <linux/timekeeping.h>
 #include <linux/topology.h>
 
 #include <asm/current.h>
@@ -43,6 +44,9 @@
 
 #define POLLING_INTERVAL_MSEC	4
 #define ZOMBIE_POLL_INTERVAL_MSEC	1000
+
+#define LIVENESS_WAIT_CHUNK_MIN_MSEC	50u
+#define LIVENESS_MAX_MULT_CEIL		1000u
 
 /*
  * Single-page fast path: embed one struct page * and one scatterlist inside
@@ -104,6 +108,7 @@ enum {
 	IO_OPCODE_PASSTHRU,
 	IO_OPCODE_SEND,
 	IO_OPCODE_RECV,
+	IO_OPCODE_PING,
 };
 
 static const char * const mxdma_op_name[] = {
@@ -118,6 +123,16 @@ static const char * const mxdma_op_name[] = {
 	"PASSTHRU(8)",
 	"SEND(9)",
 	"RECV(10)",
+	"PING(11)",
+};
+
+#define MX_PING_ID		((1 << 16) - 1)	/* reserved xfer id for watchdog ping (excluded from IDR) */
+
+enum mx_liveness_health {
+	MX_LIVENESS_UNKNOWN	= 0,	/* liveness disabled / no capability (ioctl sentinel) */
+	MX_LIVENESS_ALIVE	= 1,
+	MX_LIVENESS_SUSPECT	= 2,	/* probe sent, awaiting confirmation */
+	MX_LIVENESS_DEAD	= 3,
 };
 
 typedef union {
@@ -254,6 +269,7 @@ struct mx_queue_ops {
 	bool (*is_popable)(struct mx_queue *q);
 	void (*pop_completion)(struct mx_queue *q, struct mx_completion_info *info);
 	void (*post_complete)(struct mx_queue *q);
+	void (*build_ping_command)(void *cmd);
 };
 
 struct mx_queue {
@@ -265,6 +281,14 @@ struct mx_queue {
 	struct swait_queue_head sq_wait;
 	struct swait_queue_head cq_wait;
 	const struct mx_queue_ops *ops;
+
+	/* Transport liveness watchdog (io_queue only) */
+	atomic_t lv_health;		/* enum mx_liveness_health */
+	atomic_t lv_inflight;		/* 0/1: a watchdog ping is outstanding */
+	u64 lv_sent_ns;			/* when the current ping was pushed (dead-budget + RTT) */
+	unsigned long lv_progress_jiffies; /* last completion, or batch start */
+	u64 lv_rtt_ns;
+	uint8_t lv_ping_cmd[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
 struct mx_operations {
@@ -429,6 +453,11 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
+
+extern bool liveness_enable;
+extern unsigned int liveness_stall_ms;
+extern unsigned int liveness_dead_ms;
+extern unsigned int liveness_max_mult;
 
 bool is_empty(struct mx_mbox *mbox);
 bool is_full(struct mx_mbox *mbox);

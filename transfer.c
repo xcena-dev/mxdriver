@@ -408,14 +408,52 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	int state;
 	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
+	/* Sanitize sysfs-writable params: bounded ceiling multiplier, and a
+	 * floored chunk so the wait below never degenerates into a high-frequency
+	 * poll. */
+	unsigned int mult = liveness_enable ?
+		clamp(liveness_max_mult, 1u, LIVENESS_MAX_MULT_CEIL) : 1;
 
-	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
+	{
+		/*
+		 * timeout_ms bounds a stalled transport.  With the liveness watchdog on, a transport that keeps
+		 * responding (lv_health != DEAD) may run a large transfer past timeout_ms, up to an absolute
+		 * ceiling of timeout_ms * liveness_max_mult — which also caps a transfer the device silently
+		 * dropped while still answering other commands.
+		 */
+		unsigned int chunk_ms = liveness_enable ?
+			max(min(liveness_stall_ms, timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
+		unsigned long hard_deadline =
+			jiffies + msecs_to_jiffies(timeout_ms) * mult;
+
+		do {
+			left_time = wait_for_completion_interruptible_timeout(&transfer->done,
+					msecs_to_jiffies(chunk_ms));
+			if (left_time != 0)
+				break;	/* completed (>0) or interrupted (<0) */
+			if (!liveness_enable)
+				break;	/* legacy: single timeout_ms expiry */
+			if (atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD)
+				break;	/* transport dead — fail fast */
+		} while (time_before(jiffies, hard_deadline));
+	}
 	if ((long)left_time <= 0) {
 		unsigned long flags;
+		bool dead = liveness_enable &&
+			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
+		/* Report DEAD to the caller now; the buffer is still reclaimed lazily
+		 * via the zombie path since the device may yet touch it. */
+		ssize_t fail_ret = dead ? -EIO : 0;
 
-		if (left_time == 0)
-			pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, timeout=%u ms)\n",
-					transfer->id, (uint64_t)transfer->size, transfer->dir, timeout_ms);
+		if (left_time == 0) {
+			if (dead)
+				pr_warn("transfer failed: transport DEAD (id=%u, size=%#llx, dir=%u)\n",
+						transfer->id, (uint64_t)transfer->size, transfer->dir);
+			else
+				pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, ceiling=%lu ms)\n",
+						transfer->id, (uint64_t)transfer->size, transfer->dir,
+						(unsigned long)timeout_ms * mult);
+		}
 		else
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
 					transfer->id, (uint64_t)transfer->size, transfer->dir);
@@ -425,34 +463,33 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				mx_transfer_destroy_sg(mx_pdev, transfer);
 			else
 				release_mx_transfer(transfer);
-			ret = 0;
+			ret = fail_ret;
 			state = MX_DMA_WAIT_RECOVERED;
 			goto out;
 		}
 
 		/*
-		 * Transfer already submitted to HW. Wait non-interruptibly for
-		 * completion to avoid leaving the CXL transport in a corrupt
-		 * state. A short timeout prevents hanging process exit.
+		 * Already pushed to HW. If not known-dead, wait briefly for a late
+		 * completion before teardown; a dead transport fails now.
 		 */
-		left_time = wait_for_completion_timeout(&transfer->done,
-							msecs_to_jiffies(1000));
-		if (left_time > 0) {
-			/* Completed — clean up normally */
-			size = transfer->size;
-			if (transfer->is_sg)
-				mx_transfer_destroy_sg(mx_pdev, transfer);
-			else
-				mx_transfer_destroy_ctrl(transfer);
-			ret = size;
-			state = MX_DMA_WAIT_LATE_COMPLETED;
-			goto out;
+		if (!dead) {
+			left_time = wait_for_completion_timeout(&transfer->done,
+								msecs_to_jiffies(1000));
+			if (left_time > 0) {
+				size = transfer->size;
+				if (transfer->is_sg)
+					mx_transfer_destroy_sg(mx_pdev, transfer);
+				else
+					mx_transfer_destroy_ctrl(transfer);
+				ret = size;
+				state = MX_DMA_WAIT_LATE_COMPLETED;
+				goto out;
+			}
+			pr_warn("mx_dma: transfer did not complete within 1s (id=%u), marking zombie\n",
+					transfer->id);
 		}
 
-		pr_warn("mx_dma: interrupted transfer did not complete within 1s (id=%u), marking zombie\n",
-				transfer->id);
-
-		/* Mark as zombie - device might still be accessing memory */
+		/* Device may still be writing the buffer — park as zombie for lazy reclaim. */
 		WRITE_ONCE(transfer->is_zombie, true);
 		transfer->zombie_timestamp = jiffies;
 		atomic_inc(&mx_pdev->io_queue->zombie_wait_count);
@@ -461,7 +498,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
 		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
 
-		ret = 0;
+		ret = fail_ret;
 		state = MX_DMA_WAIT_ZOMBIE;
 		goto out;
 	}
@@ -537,6 +574,7 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 {
 	int initialized_count = 0;
 	ssize_t transferred = 0;
+	ssize_t err = 0;
 	size_t total_size = 0;
 	int ret = 0;
 	int i;
@@ -573,11 +611,17 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		return total_size;
 	}
 
-	for (i = 0; i < count; i++)
-		transferred += mx_transfer_wait(mx_pdev, transfers[i]);
+	for (i = 0; i < count; i++) {
+		ssize_t r = mx_transfer_wait(mx_pdev, transfers[i]);
+
+		if (r < 0)
+			err = r;
+		else
+			transferred += r;
+	}
 
 	kfree(transfers);
-	return transferred;
+	return err ? err : transferred;
 }
 
 /*
