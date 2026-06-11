@@ -408,9 +408,11 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	int state;
 	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
-	/* Sanitize sysfs-writable params: >=1 ceiling multiplier, and a non-zero
-	 * chunk so the wait below never degenerates into a busy-spin. */
-	unsigned int mult = liveness_enable ? max(liveness_max_mult, 1u) : 1;
+	/* Sanitize sysfs-writable params: bounded ceiling multiplier, and a
+	 * floored chunk so the wait below never degenerates into a high-frequency
+	 * poll. */
+	unsigned int mult = liveness_enable ?
+		clamp(liveness_max_mult, 1u, LIVENESS_MAX_MULT_CEIL) : 1;
 
 	{
 		/*
@@ -419,7 +421,8 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		 * ceiling of timeout_ms * liveness_max_mult — which also caps a transfer the device silently
 		 * dropped while still answering other commands.
 		 */
-		unsigned int chunk_ms = liveness_enable ? max(min(liveness_stall_ms, timeout_ms), 1u) : timeout_ms;
+		unsigned int chunk_ms = liveness_enable ?
+			max(min(liveness_stall_ms, timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
 		unsigned long hard_deadline =
 			jiffies + msecs_to_jiffies(timeout_ms) * mult;
 

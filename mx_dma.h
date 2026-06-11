@@ -45,6 +45,9 @@
 #define POLLING_INTERVAL_MSEC	4
 #define ZOMBIE_POLL_INTERVAL_MSEC	1000
 
+#define LIVENESS_WAIT_CHUNK_MIN_MSEC	50u
+#define LIVENESS_MAX_MULT_CEIL		1000u
+
 /*
  * Single-page fast path: embed one struct page * and one scatterlist inside
  * mx_transfer so the 8 B / sub-page hot path skips kcalloc(pages) and
