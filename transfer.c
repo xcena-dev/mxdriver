@@ -827,6 +827,7 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 	transfer->mx_pdev = mx_pdev;
 	transfer->is_sg = false;
 	transfer->no_completion = no_completion;
+	INIT_WORK(&transfer->work, mx_transfer_wait_work);
 
 	trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfer->id, IO_OPCODE_PASSTHRU,
 			transfer->dir, transfer->size, false, 0, 1);
