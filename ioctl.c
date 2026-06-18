@@ -212,6 +212,16 @@ static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 	return 0;
 }
 
+static struct mx_mbox *get_sq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
+{
+	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->sq_mbox_list[qid] : NULL;
+}
+
+static struct mx_mbox *get_cq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
+{
+	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->cq_mbox_list[qid] : NULL;
+}
+
 static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	struct mx_ioctl_mbox_info mbox_info;
@@ -246,20 +256,23 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
+	struct mx_mbox *sq_mbox, *cq_mbox;
 	uint32_t qid;
 	int ret;
 
 	if (copy_from_user(&qid, (void __user *)arg, sizeof(qid)))
 		return -EFAULT;
 
-	if (qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[qid] || !mx_pdev->cq_mbox_list[qid])
+	sq_mbox = get_sq_mbox(mx_pdev, qid);
+	cq_mbox = get_cq_mbox(mx_pdev, qid);
+	if (!sq_mbox || !cq_mbox)
 		return -EINVAL;
 
-	ret = reset_mx_mbox(mx_pdev, mx_pdev->sq_mbox_list[qid]);
+	ret = reset_mx_mbox(mx_pdev, sq_mbox);
 	if (ret)
 		return ret;
 
-	ret = reset_mx_mbox(mx_pdev, mx_pdev->cq_mbox_list[qid]);
+	ret = reset_mx_mbox(mx_pdev, cq_mbox);
 	if (ret)
 		return ret;
 
@@ -275,14 +288,13 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
-	if (send_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[send_cmd.qid])
+	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
+	if (!sq_mbox)
 		return -EINVAL;
 
 	if (send_cmd.user_addr && send_cmd.size > 0)
 		traced_write_data(mx_pdev, send_cmd.qid, send_cmd.user_addr, send_cmd.size,
 				&send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
-
-	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
 	while (is_full(sq_mbox)) {
@@ -318,10 +330,9 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
-	if (send_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[send_cmd.qid])
+	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
+	if (!sq_mbox)
 		return -EINVAL;
-
-	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
 
@@ -378,13 +389,12 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (copy_from_user(&recv_cmd, (void __user *)arg, sizeof(recv_cmd)))
 		return -EFAULT;
 
-	if (recv_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->cq_mbox_list[recv_cmd.qid])
+	cq_mbox = get_cq_mbox(mx_pdev, recv_cmd.qid);
+	if (!cq_mbox)
 		return -EINVAL;
 
 	if (recv_cmd.nr_cmds == 0 || !recv_cmd.cmds)
 		return -EINVAL;
-
-	cq_mbox = mx_pdev->cq_mbox_list[recv_cmd.qid];
 
 	mutex_lock(&cq_mbox->lock);
 	if (traced_read_ctrl(mx_pdev, recv_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
