@@ -233,10 +233,26 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mbox_info.qid >= MAX_NUM_OF_MBOX)
 		return -EINVAL;
 
+	/* The qid owned by the driver's internal HIO channel is never host-registerable;
+	 * its submit/complete threads drive that hardware context unconditionally. */
+	if (mx_pdev->reserved_hio_qid >= 0 && mbox_info.qid == (uint32_t)mx_pdev->reserved_hio_qid)
+		return -EBUSY;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	/* The ioctl mailbox path and direct BAR MMIO are mutually exclusive: once
+	 * userspace maps the BAR it drives the mailbox region itself, so a
+	 * kernel-managed mailbox would double-own the same hardware context. */
+	if (mx_pdev->mmap_mapping) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		return -EBUSY;
+	}
 	/* Re-registration is idempotent: a populated slot is a no-op success. SQ and
 	 * CQ are always populated together, so an SQ slot implies its CQ. */
-	if (mx_pdev->sq_mbox_list[mbox_info.qid])
+	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		return 0;
+	}
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
 	sq_mbox = create_mx_mbox(mx_pdev, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
 	if (IS_ERR(sq_mbox))
@@ -248,8 +264,25 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return PTR_ERR(cq_mbox);
 	}
 
+	/* Commit under the lock and re-check: while the mailboxes were built outside
+	 * the lock a concurrent mmap may have claimed the BAR, or another thread may
+	 * have registered this qid. */
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	if (mx_pdev->mmap_mapping) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return -EBUSY;
+	}
+	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return 0;
+	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
 	mx_pdev->cq_mbox_list[mbox_info.qid] = cq_mbox;
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
 	return 0;
 }

@@ -287,6 +287,7 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
+	mx_pdev->reserved_hio_qid = -1;
 	mutex_init(&mx_pdev->bar_mmap_lock);
 
 	if (pdev->revision == 0x1) {

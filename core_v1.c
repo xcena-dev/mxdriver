@@ -292,6 +292,9 @@ static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopc
 /******************************************************************************/
 /* Init                                                                       */
 /******************************************************************************/
+/* qid 48 is the driver-owned internal HIO channel, driven by the submit/complete
+ * threads. It is published as mx_pdev->reserved_hio_qid so ioctl_register_mbox
+ * rejects any host attempt to register it and double-own this hardware context. */
 #define HMBOX_HIO_QID		48
 #define HMBOX_RQ_OFFSET		0x1000
 #define HIFC_MBOX_BAR_OFFSET	(1ull << 20)
@@ -312,6 +315,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	}
 
 	mx_pdev->page_size = SINGLE_DMA_SIZE;
+	mx_pdev->reserved_hio_qid = HMBOX_HIO_QID;
 
 	host_mbox_base = mx_pdev->bar;
 	hifc_mbox_base = host_mbox_base + HIFC_MBOX_BAR_OFFSET;
@@ -386,6 +390,7 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 {
 	resource_size_t vm_size;
 	unsigned long pfn;
+	uint32_t qid;
 	int ret;
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
@@ -394,6 +399,15 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	if (!mx_pdev->enabled) {
 		ret = -ENODEV;
 		goto out_unlock;
+	}
+
+	/* Mutually exclusive with the ioctl mailbox path: refuse to map the BAR
+	 * while any mailbox is registered, else both would own the region. */
+	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
+		if (mx_pdev->sq_mbox_list[qid]) {
+			ret = -EBUSY;
+			goto out_unlock;
+		}
 	}
 
 	if (vma->vm_pgoff != 0) {

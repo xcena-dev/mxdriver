@@ -321,6 +321,10 @@ struct mx_pci_dev {
 	struct mx_queue *admin_queue;
 	struct mx_queue *io_queue;
 
+	/* qid owned by the driver's internal channel; host registration of it is
+	 * rejected. -1 = none (set per hardware revision). */
+	int reserved_hio_qid;
+
 	struct mx_mbox *sq_mbox_list[MAX_NUM_OF_MBOX];
 	struct mx_mbox *cq_mbox_list[MAX_NUM_OF_MBOX];
 
