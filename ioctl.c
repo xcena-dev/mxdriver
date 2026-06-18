@@ -203,9 +203,11 @@ static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_a
 static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 {
 	uint64_t ctx;
+	ssize_t ret;
 
-	if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0)
-		return -EINTR;
+	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	if (ret <= 0)
+		return ret < 0 ? ret : -EIO;
 
 	mbox->ctx.u64 = ctx;
 
@@ -301,6 +303,8 @@ static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (!sq_mbox || !cq_mbox)
 		return -EINVAL;
 
+	/* Each reset is an idempotent device-context refresh, so a failed INIT_MBOX
+	 * is always safe to retry even if the SQ was already refreshed. */
 	ret = reset_mx_mbox(mx_pdev, sq_mbox);
 	if (ret)
 		return ret;
