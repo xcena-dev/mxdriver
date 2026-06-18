@@ -173,33 +173,43 @@ static uint32_t get_popable_count(struct mx_mbox *mbox)
 		return mbox->depth - head.index;
 }
 
+/* Returns ERR_PTR on failure so the caller can propagate the real errno
+ * (invalid context vs. failed read vs. OOM). */
 static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_addr, uint64_t data_addr)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_mbox *mbox;
 	uint64_t ctx;
+	ssize_t ret;
 
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
+	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
+	if (ret <= 0)
+		return ERR_PTR(ret < 0 ? ret : -EIO);
+
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%llx)\n", ctx_addr);
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	mbox = devm_kzalloc(dev, sizeof(struct mx_mbox), GFP_KERNEL);
 	if (!mbox)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	mx_mbox_init(mbox, ctx_addr, data_addr, ctx);
 
 	return mbox;
 }
 
-static void reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
+static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 {
 	uint64_t ctx;
 
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	if (read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0)
+		return -EINTR;
+
 	mbox->ctx.u64 = ctx;
+
+	return 0;
 }
 
 static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
@@ -213,16 +223,19 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mbox_info.qid >= MAX_NUM_OF_MBOX)
 		return -EINVAL;
 
+	/* Re-registration is idempotent: a populated slot is a no-op success. SQ and
+	 * CQ are always populated together, so an SQ slot implies its CQ. */
 	if (mx_pdev->sq_mbox_list[mbox_info.qid])
 		return 0;
 
 	sq_mbox = create_mx_mbox(mx_pdev, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
-	if (!sq_mbox)
-		return -ENOMEM;
+	if (IS_ERR(sq_mbox))
+		return PTR_ERR(sq_mbox);
 
 	cq_mbox = create_mx_mbox(mx_pdev, mbox_info.cq_ctx_addr, mbox_info.cq_data_addr);
-	if (!cq_mbox) {
-		return -ENOMEM;
+	if (IS_ERR(cq_mbox)) {
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return PTR_ERR(cq_mbox);
 	}
 
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
@@ -234,6 +247,7 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	uint32_t qid;
+	int ret;
 
 	if (copy_from_user(&qid, (void __user *)arg, sizeof(qid)))
 		return -EFAULT;
@@ -241,8 +255,13 @@ static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[qid] || !mx_pdev->cq_mbox_list[qid])
 		return -EINVAL;
 
-	reset_mx_mbox(mx_pdev, mx_pdev->sq_mbox_list[qid]);
-	reset_mx_mbox(mx_pdev, mx_pdev->cq_mbox_list[qid]);
+	ret = reset_mx_mbox(mx_pdev, mx_pdev->sq_mbox_list[qid]);
+	if (ret)
+		return ret;
+
+	ret = reset_mx_mbox(mx_pdev, mx_pdev->cq_mbox_list[qid]);
+	if (ret)
+		return ret;
 
 	return 0;
 }
