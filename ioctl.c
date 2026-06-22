@@ -241,10 +241,10 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return -EBUSY;
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
-	/* The ioctl mailbox path and direct BAR MMIO are mutually exclusive: once
-	 * userspace maps the BAR it drives the mailbox region itself, so a
-	 * kernel-managed mailbox would double-own the same hardware context. */
-	if (mx_pdev->mmap_mapping) {
+	/* Mutually exclusive with an actively mapped BAR: a mapped BAR lets userspace drive
+	 * the mailbox region, so a kernel mailbox would double-own it. mapping_mapped() reads
+	 * live VMAs, so registration reopens once userspace munmaps the BAR. */
+	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		return -EBUSY;
 	}
@@ -270,7 +270,7 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	 * the lock a concurrent mmap may have claimed the BAR, or another thread may
 	 * have registered this qid. */
 	mutex_lock(&mx_pdev->bar_mmap_lock);
-	if (mx_pdev->mmap_mapping) {
+	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
 		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
