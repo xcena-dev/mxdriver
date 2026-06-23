@@ -173,33 +173,64 @@ static uint32_t get_popable_count(struct mx_mbox *mbox)
 		return mbox->depth - head.index;
 }
 
+/* Returns ERR_PTR on failure so the caller can propagate the real errno
+ * (invalid context vs. failed read vs. OOM). */
 static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_addr, uint64_t data_addr)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_mbox *mbox;
 	uint64_t ctx;
+	ssize_t ret;
 
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
+	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
+	if (ret <= 0)
+		return ERR_PTR(ret < 0 ? ret : -EIO);
+
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%llx)\n", ctx_addr);
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	mbox = devm_kzalloc(dev, sizeof(struct mx_mbox), GFP_KERNEL);
 	if (!mbox)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	mx_mbox_init(mbox, ctx_addr, data_addr, ctx);
 
 	return mbox;
 }
 
-static void reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
+static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 {
 	uint64_t ctx;
+	ssize_t ret;
 
-	read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	if (ret <= 0)
+		return ret < 0 ? ret : -EIO;
+
 	mbox->ctx.u64 = ctx;
+
+	return 0;
+}
+
+static struct mx_mbox *get_sq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
+{
+	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->sq_mbox_list[qid] : NULL;
+}
+
+static struct mx_mbox *get_cq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
+{
+	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->cq_mbox_list[qid] : NULL;
+}
+
+/* The ctx address fixes the mailbox's hardware context (data_addr is derived from
+ * it), so matching SQ+CQ ctx addresses identify the same registered mailbox. */
+static bool registered_mbox_matches(struct mx_pci_dev *mx_pdev, uint32_t qid,
+				    const struct mx_ioctl_mbox_info *info)
+{
+	return mx_pdev->sq_mbox_list[qid]->r_ctx_addr == info->sq_ctx_addr &&
+	       mx_pdev->cq_mbox_list[qid]->r_ctx_addr == info->cq_ctx_addr;
 }
 
 static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
@@ -213,36 +244,88 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mbox_info.qid >= MAX_NUM_OF_MBOX)
 		return -EINVAL;
 
-	if (mx_pdev->sq_mbox_list[mbox_info.qid])
-		return 0;
+	/* The qid owned by the driver's internal HIO channel is never host-registerable;
+	 * its submit/complete threads drive that hardware context unconditionally. */
+	if (mx_pdev->reserved_hio_qid >= 0 && mbox_info.qid == (uint32_t)mx_pdev->reserved_hio_qid)
+		return -EBUSY;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	/* Mutually exclusive with an actively mapped BAR: a mapped BAR lets userspace drive
+	 * the mailbox region, so a kernel mailbox would double-own it. mapping_mapped() reads
+	 * live VMAs, so registration reopens once userspace munmaps the BAR. */
+	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		return -EBUSY;
+	}
+	/* Idempotent only for the same context: a populated slot with matching SQ+CQ ctx
+	 * addresses is a no-op success; a mismatch repoints a qid that has no unregister
+	 * path, so reject it. An SQ slot implies its CQ (populated together). */
+	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
+
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		return matches ? 0 : -EINVAL;
+	}
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
 	sq_mbox = create_mx_mbox(mx_pdev, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
-	if (!sq_mbox)
-		return -ENOMEM;
+	if (IS_ERR(sq_mbox))
+		return PTR_ERR(sq_mbox);
 
 	cq_mbox = create_mx_mbox(mx_pdev, mbox_info.cq_ctx_addr, mbox_info.cq_data_addr);
-	if (!cq_mbox) {
-		return -ENOMEM;
+	if (IS_ERR(cq_mbox)) {
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return PTR_ERR(cq_mbox);
 	}
 
+	/* Commit under the lock and re-check: while the mailboxes were built outside
+	 * the lock a concurrent mmap may have claimed the BAR, or another thread may
+	 * have registered this qid. */
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return -EBUSY;
+	}
+	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
+
+		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
+		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		return matches ? 0 : -EINVAL;
+	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
 	mx_pdev->cq_mbox_list[mbox_info.qid] = cq_mbox;
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
 	return 0;
 }
 
 static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
+	struct mx_mbox *sq_mbox, *cq_mbox;
 	uint32_t qid;
+	int ret;
 
 	if (copy_from_user(&qid, (void __user *)arg, sizeof(qid)))
 		return -EFAULT;
 
-	if (qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[qid] || !mx_pdev->cq_mbox_list[qid])
+	sq_mbox = get_sq_mbox(mx_pdev, qid);
+	cq_mbox = get_cq_mbox(mx_pdev, qid);
+	if (!sq_mbox || !cq_mbox)
 		return -EINVAL;
 
-	reset_mx_mbox(mx_pdev, mx_pdev->sq_mbox_list[qid]);
-	reset_mx_mbox(mx_pdev, mx_pdev->cq_mbox_list[qid]);
+	/* Each reset is an idempotent device-context refresh, so a failed INIT_MBOX
+	 * is always safe to retry even if the SQ was already refreshed. */
+	ret = reset_mx_mbox(mx_pdev, sq_mbox);
+	if (ret)
+		return ret;
+
+	ret = reset_mx_mbox(mx_pdev, cq_mbox);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -256,14 +339,13 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
-	if (send_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[send_cmd.qid])
+	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
+	if (!sq_mbox)
 		return -EINVAL;
 
 	if (send_cmd.user_addr && send_cmd.size > 0)
 		traced_write_data(mx_pdev, send_cmd.qid, send_cmd.user_addr, send_cmd.size,
 				&send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
-
-	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
 	while (is_full(sq_mbox)) {
@@ -299,10 +381,9 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
-	if (send_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[send_cmd.qid])
+	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
+	if (!sq_mbox)
 		return -EINVAL;
-
-	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
 	mutex_lock(&sq_mbox->lock);
 
@@ -359,13 +440,12 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (copy_from_user(&recv_cmd, (void __user *)arg, sizeof(recv_cmd)))
 		return -EFAULT;
 
-	if (recv_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->cq_mbox_list[recv_cmd.qid])
+	cq_mbox = get_cq_mbox(mx_pdev, recv_cmd.qid);
+	if (!cq_mbox)
 		return -EINVAL;
 
 	if (recv_cmd.nr_cmds == 0 || !recv_cmd.cmds)
 		return -EINVAL;
-
-	cq_mbox = mx_pdev->cq_mbox_list[recv_cmd.qid];
 
 	mutex_lock(&cq_mbox->lock);
 	if (traced_read_ctrl(mx_pdev, recv_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),

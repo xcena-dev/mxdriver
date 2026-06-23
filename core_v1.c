@@ -292,6 +292,9 @@ static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopc
 /******************************************************************************/
 /* Init                                                                       */
 /******************************************************************************/
+/* qid 48 is the driver-owned internal HIO channel, driven by the submit/complete
+ * threads. It is published as mx_pdev->reserved_hio_qid so ioctl_register_mbox
+ * rejects any host attempt to register it and double-own this hardware context. */
 #define HMBOX_HIO_QID		48
 #define HMBOX_RQ_OFFSET		0x1000
 #define HIFC_MBOX_BAR_OFFSET	(1ull << 20)
@@ -312,6 +315,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	}
 
 	mx_pdev->page_size = SINGLE_DMA_SIZE;
+	mx_pdev->reserved_hio_qid = HMBOX_HIO_QID;
 
 	host_mbox_base = mx_pdev->bar;
 	hifc_mbox_base = host_mbox_base + HIFC_MBOX_BAR_OFFSET;
@@ -386,6 +390,7 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 {
 	resource_size_t vm_size;
 	unsigned long pfn;
+	uint32_t qid;
 	int ret;
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
@@ -394,6 +399,16 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	if (!mx_pdev->enabled) {
 		ret = -ENODEV;
 		goto out_unlock;
+	}
+
+	/* Mutually exclusive with the ioctl mailbox path: refuse to map the BAR while any
+	 * mailbox is registered. Unlike the reverse guard this is permanent for the device's
+	 * lifetime — mailbox registration has no unregister path to clear the slot. */
+	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
+		if (mx_pdev->sq_mbox_list[qid]) {
+			ret = -EBUSY;
+			goto out_unlock;
+		}
 	}
 
 	if (vma->vm_pgoff != 0) {
@@ -419,6 +434,9 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 #endif
 
+	/* The mapping covers the whole BAR, including the qid-48 HIO region the driver's
+	 * own submit/complete threads drive. That kernel-owned context stays live, so a
+	 * BAR mapper is trusted not to touch it. */
 	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
