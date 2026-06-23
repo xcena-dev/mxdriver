@@ -224,6 +224,15 @@ static struct mx_mbox *get_cq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
 	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->cq_mbox_list[qid] : NULL;
 }
 
+/* The ctx address fixes the mailbox's hardware context (data_addr is derived from
+ * it), so matching SQ+CQ ctx addresses identify the same registered mailbox. */
+static bool registered_mbox_matches(struct mx_pci_dev *mx_pdev, uint32_t qid,
+				    const struct mx_ioctl_mbox_info *info)
+{
+	return mx_pdev->sq_mbox_list[qid]->r_ctx_addr == info->sq_ctx_addr &&
+	       mx_pdev->cq_mbox_list[qid]->r_ctx_addr == info->cq_ctx_addr;
+}
+
 static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	struct mx_ioctl_mbox_info mbox_info;
@@ -248,11 +257,14 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		return -EBUSY;
 	}
-	/* Re-registration is idempotent: a populated slot is a no-op success. SQ and
-	 * CQ are always populated together, so an SQ slot implies its CQ. */
+	/* Idempotent only for the same context: a populated slot with matching SQ+CQ ctx
+	 * addresses is a no-op success; a mismatch repoints a qid that has no unregister
+	 * path, so reject it. An SQ slot implies its CQ (populated together). */
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
+
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
-		return 0;
+		return matches ? 0 : -EINVAL;
 	}
 	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
@@ -277,10 +289,12 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return -EBUSY;
 	}
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
+		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
+
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
 		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
-		return 0;
+		return matches ? 0 : -EINVAL;
 	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
 	mx_pdev->cq_mbox_list[mbox_info.qid] = cq_mbox;
