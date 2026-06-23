@@ -401,8 +401,9 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 		goto out_unlock;
 	}
 
-	/* Mutually exclusive with the ioctl mailbox path: refuse to map the BAR
-	 * while any mailbox is registered, else both would own the region. */
+	/* Mutually exclusive with the ioctl mailbox path: refuse to map the BAR while any
+	 * mailbox is registered. Unlike the reverse guard this is permanent for the device's
+	 * lifetime — mailbox registration has no unregister path to clear the slot. */
 	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
 		if (mx_pdev->sq_mbox_list[qid]) {
 			ret = -EBUSY;
@@ -433,6 +434,9 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 #endif
 
+	/* The mapping covers the whole BAR, including the qid-48 HIO region the driver's
+	 * own submit/complete threads drive. That kernel-owned context stays live, so a
+	 * BAR mapper is trusted not to touch it. */
 	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
