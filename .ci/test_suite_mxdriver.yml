@@ -18,6 +18,7 @@ targets:
         - { src: tests,   dst: tests }
         - { src: driver,  dst: driver }
     - install: |
+        set -e
         cd driver
         sudo ./install.sh
         cd ..
