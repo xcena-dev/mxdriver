@@ -1,0 +1,11 @@
+- name: "MX Driver DMA Test"
+  description: "DMA test against this driver, after install + reboot, on a full vmm base"
+  targets:
+    - qemu
+  tags:
+    - push
+    - pr
+    - scheduled
+  command: |
+    echo "[boot-accel] $(systemd-detect-virt) (kvm=KVM, qemu=TCG/no-KVM)"
+    cd ~/tests/dma_test && ./test.sh

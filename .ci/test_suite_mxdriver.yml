@@ -1,28 +1,25 @@
-name: MX Driver DMA Test Suite
-description: "MX Driver DMA Test Suite"
+name: MX Driver CI Test Suite
+
 test_scope_includes:
   - .ci
+test_case_files:
+  - test_case_dma_test.yml
 schedule: "0 21 * * *"
+description: "MX Driver CI Test Suite"
 working_repository: sdk_release
+
 targets:
   qemu:
+    - backend: vmm
+    # The driver is a kernel module: build+install the .ko, then reboot so it
+    # loads bound to the device before any test runs.
+    - reboot_after_install: true
+    - push:
+        - { src: tests,   dst: tests }
+        - { src: driver,  dst: driver }
+    - install: |
+        cd driver
+        sudo ./install.sh
+        cd ..
     - commons:
-       - ssh_port: 10000
-    - post:
-      - success:
-        - ./.ci/qemu/post.success.sh
-      - failure:
-        - ./.ci/qemu/post.failure.sh
-    - exit:
-      - ./.ci/qemu/exit.sh
-  qemu_system:
-    - init:
-      - ./.ci/qemu/build.sh
-      - ./.ci/qemu/init.sh
-    - post:
-      - success:
-        - ./.ci/qemu/post.success.sh
-      - failure:
-        - ./.ci/qemu/post.failure.sh
-    - exit:
-      - ./.ci/qemu/exit.sh
+        - timeout: 3600
