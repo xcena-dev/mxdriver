@@ -1,5 +1,5 @@
 - name: "MX Driver DMA Test"
-  description: "DMA test against this driver, after install + reboot, on a full vmm base"
+  description: "DMA test against this driver, after install + reboot"
   targets:
     - qemu
   tags:
