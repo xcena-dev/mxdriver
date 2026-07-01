@@ -17,6 +17,11 @@ targets:
     - push:
         - { src: tests,   dst: tests }
         - { src: driver,  dst: driver }
+    - uninstall: |
+        set -e
+        cd driver
+        sudo ./uninstall.sh
+        cd ..
     - install: |
         set -e
         cd driver
