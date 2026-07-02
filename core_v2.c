@@ -358,6 +358,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 	uint64_t __iomem *dbs = mx_pdev->bar + NVME_REG_DBS;
 
 	queue->common.dev = &mx_pdev->pdev->dev;
+	queue->common.mx_pdev = mx_pdev;
 	queue->qid = qid;
 	queue->sq_tail = 0;
 	queue->sq_head = 0;

@@ -161,6 +161,148 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	return 0;
 }
 
+static ssize_t liveness_enable_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
+
+	if (!mx_pdev)
+		return -ENODEV;
+	return sysfs_emit(buf, "%d\n", READ_ONCE(mx_pdev->liveness_enable));
+}
+
+static ssize_t liveness_enable_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
+	struct mx_queue *q;
+	unsigned long flags;
+	bool val;
+	int ret;
+
+	if (!mx_pdev)
+		return -ENODEV;
+
+	ret = kstrtobool(buf, &val);
+	if (ret)
+		return ret;
+
+	WRITE_ONCE(mx_pdev->liveness_enable, val);
+
+	/* Reset watchdog state under sq_lock so a runtime toggle neither inherits a
+	 * stale DEAD verdict on enable nor freezes health the watchdog stops updating. */
+	q = mx_pdev->io_queue;
+	if (q) {
+		spin_lock_irqsave(&q->sq_lock, flags);
+		atomic_set(&q->lv_inflight, 0);
+		if (val) {
+			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
+			atomic_set(&q->lv_health, MX_LIVENESS_ALIVE);
+		} else {
+			atomic_set(&q->lv_health, MX_LIVENESS_UNKNOWN);
+		}
+		spin_unlock_irqrestore(&q->sq_lock, flags);
+	}
+
+	return count;
+}
+static DEVICE_ATTR(enable, 0644, liveness_enable_show, liveness_enable_store);
+
+/* stall_ms/dead_ms/max_mult share one shape: a per-device uint. Store only
+ * parses; the watchdog and transfer read sites sanitize (1 <= stall < dead,
+ * mult ceiling), so no bound is enforced here. */
+#define LIVENESS_UINT_ATTR(attr_name, field)					\
+static ssize_t attr_name##_show(struct device *dev,				\
+				struct device_attribute *attr, char *buf)	\
+{										\
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);			\
+	if (!mx_pdev)								\
+		return -ENODEV;							\
+	return sysfs_emit(buf, "%u\n", READ_ONCE(mx_pdev->field));		\
+}										\
+static ssize_t attr_name##_store(struct device *dev,				\
+				 struct device_attribute *attr,			\
+				 const char *buf, size_t count)			\
+{										\
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);			\
+	unsigned int val;							\
+	int ret;								\
+	if (!mx_pdev)								\
+		return -ENODEV;							\
+	ret = kstrtouint(buf, 0, &val);						\
+	if (ret)								\
+		return ret;							\
+	WRITE_ONCE(mx_pdev->field, val);					\
+	return count;								\
+}										\
+static DEVICE_ATTR(attr_name, 0644, attr_name##_show, attr_name##_store)
+
+LIVENESS_UINT_ATTR(stall_ms, liveness_stall_ms);
+LIVENESS_UINT_ATTR(dead_ms, liveness_dead_ms);
+LIVENESS_UINT_ATTR(max_mult, liveness_max_mult);
+
+static const char * const liveness_health_name[] = {
+	[MX_LIVENESS_UNKNOWN] = "unknown",
+	[MX_LIVENESS_ALIVE]   = "alive",
+	[MX_LIVENESS_SUSPECT] = "suspect",
+	[MX_LIVENESS_DEAD]    = "dead",
+};
+
+/* State attrs report the sentinel (unknown / 0) whenever the watchdog is off or
+ * the io_queue is gone, never a stale value. */
+static ssize_t health_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
+	struct mx_queue *q;
+	int health = MX_LIVENESS_UNKNOWN;
+
+	if (!mx_pdev)
+		return -ENODEV;
+	q = mx_pdev->io_queue;
+	if (READ_ONCE(mx_pdev->liveness_enable) && q)
+		health = atomic_read(&q->lv_health);
+	return sysfs_emit(buf, "%s\n", liveness_health_name[health]);
+}
+static DEVICE_ATTR_RO(health);
+
+static ssize_t rtt_ns_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
+	struct mx_queue *q;
+	u64 rtt = 0;
+
+	if (!mx_pdev)
+		return -ENODEV;
+	q = mx_pdev->io_queue;
+	if (READ_ONCE(mx_pdev->liveness_enable) && q)
+		rtt = READ_ONCE(q->lv_rtt_ns);
+	return sysfs_emit(buf, "%llu\n", rtt);
+}
+static DEVICE_ATTR_RO(rtt_ns);
+
+static struct attribute *liveness_attrs[] = {
+	&dev_attr_enable.attr,
+	&dev_attr_stall_ms.attr,
+	&dev_attr_dead_ms.attr,
+	&dev_attr_max_mult.attr,
+	&dev_attr_health.attr,
+	&dev_attr_rtt_ns.attr,
+	NULL,
+};
+
+static const struct attribute_group liveness_group = {
+	.name = "liveness",
+	.attrs = liveness_attrs,
+};
+
+static const struct attribute_group *mxdma_dev_groups[] = {
+	&liveness_group,
+	NULL,
+};
+
 static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 {
 	struct mx_char_dev *mx_cdev = &mx_pdev->mx_cdev[type];
@@ -179,7 +321,14 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 		return ret;
 	}
 
-	dev = device_create(mxdma_class, NULL, mx_cdev->cdev_no, NULL, mx_cdev->cdev.kobj.name);
+	/* Hang the per-device liveness/ sysfs group off the ioctl node, the device's
+	 * control node; drvdata lets its show/store reach mx_pdev. */
+	if (type == MX_CDEV_IOCTL)
+		dev = device_create_with_groups(mxdma_class, NULL, mx_cdev->cdev_no,
+						mx_pdev, mxdma_dev_groups,
+						mx_cdev->cdev.kobj.name);
+	else
+		dev = device_create(mxdma_class, NULL, mx_cdev->cdev_no, NULL, mx_cdev->cdev.kobj.name);
 	if (IS_ERR(dev)) {
 		pr_err("Failed to device_created (err=%ld)\n", PTR_ERR(dev));
 		return PTR_ERR(dev);
@@ -287,6 +436,9 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
+	mx_pdev->liveness_stall_ms = LIVENESS_STALL_MS_DEFAULT;
+	mx_pdev->liveness_dead_ms = LIVENESS_DEAD_MS_DEFAULT;
+	mx_pdev->liveness_max_mult = LIVENESS_MAX_MULT_DEFAULT;
 	mx_pdev->reserved_hio_qid = -1;
 	mutex_init(&mx_pdev->bar_mmap_lock);
 

@@ -340,6 +340,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	mx_mbox_init(&queue->cq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
 	queue->common.dev = dev;
+	queue->common.mx_pdev = mx_pdev;
 	queue->common.ops = &v1_queue_ops;
 	spin_lock_init(&queue->common.sq_lock);
 	INIT_LIST_HEAD(&queue->common.sq_list);
