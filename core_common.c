@@ -10,17 +10,6 @@
 #define trace_mx_dma_xfer_complete_orphan(xfer_id, status, result)		do { } while (0)
 #endif
 
-bool liveness_enable;
-module_param(liveness_enable, bool, 0644);
-MODULE_PARM_DESC(liveness_enable, "Enable device liveness ping watchdog (requires ping-capable FW)");
-unsigned int liveness_stall_ms = 1000;
-module_param(liveness_stall_ms, uint, 0644);
-unsigned int liveness_dead_ms = 5000;
-module_param(liveness_dead_ms, uint, 0644);
-unsigned int liveness_max_mult = 10;
-module_param(liveness_max_mult, uint, 0644);
-MODULE_PARM_DESC(liveness_max_mult, "Absolute wait ceiling = timeout_ms * this (clamped to 1..1000) while transport stays alive");
-
 /******************************************************************************/
 /* Descriptor list utilities                                                  */
 /******************************************************************************/
@@ -266,12 +255,13 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
  */
 static void mx_liveness_watchdog(struct mx_queue *q)
 {
+	struct mx_pci_dev *mx_pdev = q->mx_pdev;
 	unsigned long now = jiffies;
 	int outstanding = atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
 	/* Snapshot + sanitize sysfs-writable params: keep 1 <= stall < dead so a probe
 	 * is always attempted before the no-completion DEAD verdict fires. */
-	unsigned int dead_ms = max(liveness_dead_ms, 2u);
-	unsigned int stall_ms = clamp(liveness_stall_ms, 1u, dead_ms - 1);
+	unsigned int dead_ms = max(READ_ONCE(mx_pdev->liveness_dead_ms), 2u);
+	unsigned int stall_ms = clamp(READ_ONCE(mx_pdev->liveness_stall_ms), 1u, dead_ms - 1);
 	unsigned long stalled_ms;
 
 	if (outstanding <= 0)
@@ -313,6 +303,7 @@ int mx_submit_handler(void *arg)
 	unsigned long flags;
 	unsigned int idle_count = 0;
 	bool pushed_any;
+	bool lv_on;
 
 	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(q->sq_wait,
@@ -320,10 +311,11 @@ int mx_submit_handler(void *arg)
 				POLLING_INTERVAL_MSEC);
 
 		pushed_any = false;
+		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		spin_lock_irqsave(&q->sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
 			/* Ping outstanding: hold submits until the pong resolves — the liveness probe has priority. */
-			if (liveness_enable && atomic_read(&q->lv_inflight))
+			if (lv_on && atomic_read(&q->lv_inflight))
 				break;
 			if (!ops->is_pushable(q))
 				break;
@@ -348,7 +340,7 @@ int mx_submit_handler(void *arg)
 				swake_up_one(&q->cq_wait);
 			}
 		}
-		if (liveness_enable)
+		if (lv_on)
 			mx_liveness_watchdog(q);
 		spin_unlock_irqrestore(&q->sq_lock, flags);
 
