@@ -11,6 +11,7 @@ working_repository: sdk_release
 targets:
   qemu:
     - backend: vmm
+    - stop-on-error: true
     # The driver is a kernel module: build+install the .ko, then reboot so it
     # loads bound to the device before any test runs.
     - reboot_after_install: true
