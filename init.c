@@ -188,13 +188,13 @@ static ssize_t liveness_enable_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	WRITE_ONCE(mx_pdev->liveness_enable, val);
-
-	/* Reset watchdog state under sq_lock so a runtime toggle neither inherits a
-	 * stale DEAD verdict on enable nor freezes health the watchdog stops updating. */
+	/* Reset watchdog state and publish the toggle in one sq_lock section;
+	 * the submit handler samples the flag before locking, so publish-first
+	 * could run the watchdog on stale state and false-DEAD a live transfer. */
 	q = mx_pdev->io_queue;
 	if (q) {
 		spin_lock_irqsave(&q->sq_lock, flags);
+		WRITE_ONCE(mx_pdev->liveness_enable, val);
 		atomic_set(&q->lv_inflight, 0);
 		if (val) {
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
@@ -203,6 +203,8 @@ static ssize_t liveness_enable_store(struct device *dev,
 			atomic_set(&q->lv_health, MX_LIVENESS_UNKNOWN);
 		}
 		spin_unlock_irqrestore(&q->sq_lock, flags);
+	} else {
+		WRITE_ONCE(mx_pdev->liveness_enable, val);
 	}
 
 	return count;
