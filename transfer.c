@@ -408,11 +408,14 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	int state;
 	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
+	/* Snapshot the per-device toggle once so the whole wait sees a consistent
+	 * value even if a sysfs write flips it mid-transfer. */
+	bool lv_on = READ_ONCE(mx_pdev->liveness_enable);
 	/* Sanitize sysfs-writable params: bounded ceiling multiplier, and a
 	 * floored chunk so the wait below never degenerates into a high-frequency
 	 * poll. */
-	unsigned int mult = liveness_enable ?
-		clamp(liveness_max_mult, 1u, LIVENESS_MAX_MULT_CEIL) : 1;
+	unsigned int mult = lv_on ?
+		clamp(READ_ONCE(mx_pdev->liveness_max_mult), 1u, LIVENESS_MAX_MULT_CEIL) : 1;
 
 	{
 		/*
@@ -421,8 +424,8 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		 * ceiling of timeout_ms * liveness_max_mult — which also caps a transfer the device silently
 		 * dropped while still answering other commands.
 		 */
-		unsigned int chunk_ms = liveness_enable ?
-			max(min(liveness_stall_ms, timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
+		unsigned int chunk_ms = lv_on ?
+			max(min(READ_ONCE(mx_pdev->liveness_stall_ms), timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
 		unsigned long hard_deadline =
 			jiffies + msecs_to_jiffies(timeout_ms) * mult;
 
@@ -431,7 +434,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 					msecs_to_jiffies(chunk_ms));
 			if (left_time != 0)
 				break;	/* completed (>0) or interrupted (<0) */
-			if (!liveness_enable)
+			if (!lv_on)
 				break;	/* legacy: single timeout_ms expiry */
 			if (atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD)
 				break;	/* transport dead — fail fast */
@@ -439,7 +442,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	}
 	if ((long)left_time <= 0) {
 		unsigned long flags;
-		bool dead = liveness_enable &&
+		bool dead = lv_on &&
 			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
 		/* Report DEAD to the caller now; the buffer is still reclaimed lazily
 		 * via the zombie path since the device may yet touch it. */

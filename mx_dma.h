@@ -47,6 +47,9 @@
 
 #define LIVENESS_WAIT_CHUNK_MIN_MSEC	50u
 #define LIVENESS_MAX_MULT_CEIL		1000u
+#define LIVENESS_STALL_MS_DEFAULT	1000u
+#define LIVENESS_DEAD_MS_DEFAULT	5000u
+#define LIVENESS_MAX_MULT_DEFAULT	10u
 
 /*
  * Single-page fast path: embed one struct page * and one scatterlist inside
@@ -274,6 +277,7 @@ struct mx_queue_ops {
 
 struct mx_queue {
 	struct device *dev;
+	struct mx_pci_dev *mx_pdev;
 	struct list_head sq_list;
 	spinlock_t sq_lock;
 	atomic_t wait_count;
@@ -307,6 +311,13 @@ struct mx_pci_dev {
 
 	struct pci_dev *pdev;
 	bool enabled;
+
+	/* Per-device liveness watchdog config, exposed under the liveness/ sysfs
+	 * group. Off by default; a host service enables it only on ping-capable FW. */
+	bool liveness_enable;
+	unsigned int liveness_stall_ms;
+	unsigned int liveness_dead_ms;
+	unsigned int liveness_max_mult;
 
 	void __iomem *bar;
 	resource_size_t bar_mapped_size;
@@ -458,10 +469,6 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
 
-extern bool liveness_enable;
-extern unsigned int liveness_stall_ms;
-extern unsigned int liveness_dead_ms;
-extern unsigned int liveness_max_mult;
 
 bool is_empty(struct mx_mbox *mbox);
 bool is_full(struct mx_mbox *mbox);
