@@ -196,6 +196,9 @@ static ssize_t liveness_enable_store(struct device *dev,
 		spin_lock_irqsave(&q->sq_lock, flags);
 		WRITE_ONCE(mx_pdev->liveness_enable, val);
 		atomic_set(&q->lv_inflight, 0);
+		/* Zero, not keep: rtt_ns is only rewritten on a pong, so a re-enable
+		 * would otherwise expose the previous session's RTT indefinitely. */
+		WRITE_ONCE(q->lv_rtt_ns, 0);
 		if (val) {
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 			atomic_set(&q->lv_health, MX_LIVENESS_ALIVE);
