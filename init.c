@@ -333,6 +333,9 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 		dev = device_create(mxdma_class, NULL, mx_cdev->cdev_no, NULL, mx_cdev->cdev.kobj.name);
 	if (IS_ERR(dev)) {
 		pr_err("Failed to device_created (err=%ld)\n", PTR_ERR(dev));
+		/* Unregister now: enabled is still false, so destroy_mx_cdev skips this
+		 * node and a registered cdev would outlive its devm-freed struct. */
+		cdev_del(&mx_cdev->cdev);
 		return PTR_ERR(dev);
 	}
 
