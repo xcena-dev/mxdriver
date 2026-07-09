@@ -95,14 +95,20 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 {
 	struct mx_sg_context *ctx;
 	struct sg_table *sgt;
-	unsigned int pages_nr, offset, gup_flags = 0;
+	unsigned int offset, gup_flags = 0;
+	unsigned long pages_nr;
 	long pinned;
 	int ret;
 
 	offset = offset_in_page((unsigned long)user_addr);
-	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
-	if (!pages_nr)
+
+	/* pin_user_pages_fast() takes an int page count and total_size also sets the
+	 * SG entry length; bound the size so the page count can neither overflow int
+	 * nor be truncated below the mapping it must back. */
+	if (total_size == 0 || total_size > (size_t)INT_MAX * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
+
+	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
 
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
@@ -140,7 +146,7 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		const char *kind = pinned < 0 ? "failed" :
 				   pinned == 0 ? "none" : "partial";
 
-		pr_warn("pin_user_pages_fast %s (req=%u, got=%ld)\n", kind, pages_nr, pinned);
+		pr_warn("pin_user_pages_fast %s (req=%lu, got=%ld)\n", kind, pages_nr, pinned);
 		ret = (pinned < 0) ? (int)pinned : -EFAULT;
 		goto err;
 	}
