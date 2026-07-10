@@ -35,7 +35,7 @@ static int mxdma_device_release(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 
-	file->private_data = 0;
+	file->private_data = NULL;
 
 	return 0;
 }
@@ -188,7 +188,7 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 	return mx_pdev->ops.bar_mmap(mx_pdev, vma);
 }
 
-static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
+static __poll_t mxdma_device_poll(struct file *file, poll_table *wait)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
@@ -197,7 +197,7 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 
 	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
 	if (ret)
-		return POLLERR;
+		return EPOLLERR;
 
 	mx_event = &mx_pdev->event;
 	poll_wait(file, &mx_event->wq, wait);
@@ -205,7 +205,7 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 	ret = atomic_read(&mx_event->count);
 	if (ret > 0) {
 		atomic_dec(&mx_event->count);
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 	}
 
 	return 0;
@@ -238,7 +238,7 @@ static int mxdma_bdf_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-struct file_operations mxdma_fops_data = {
+static const struct file_operations mxdma_fops_data = {
 	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -246,7 +246,7 @@ struct file_operations mxdma_fops_data = {
 	.write = mxdma_device_write_data,
 };
 
-struct file_operations mxdma_fops_context = {
+static const struct file_operations mxdma_fops_context = {
 	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -254,7 +254,7 @@ struct file_operations mxdma_fops_context = {
 	.write = mxdma_device_write_context,
 };
 
-struct file_operations mxdma_fops_ioctl = {
+static const struct file_operations mxdma_fops_ioctl = {
 	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -262,20 +262,20 @@ struct file_operations mxdma_fops_ioctl = {
 	.mmap = mxdma_bar_mmap,
 };
 
-struct file_operations mxdma_fops_event = {
+static const struct file_operations mxdma_fops_event = {
 	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.poll = mxdma_device_poll,
 };
 
-struct file_operations mxdma_fops_bdf = {
+static const struct file_operations mxdma_fops_bdf = {
 	.owner = THIS_MODULE,
 	.open = mxdma_bdf_open,
 	.read = mxdma_bdf_read,
 };
 
-struct file_operations *mxdma_fops_array[] = {
+const struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_DATA] = &mxdma_fops_data,
 	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
 	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,

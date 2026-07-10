@@ -360,7 +360,7 @@ struct mx_pci_dev {
 	struct pm_qos_request cpu_latency_req;
 };
 
-extern struct file_operations *mxdma_fops_array[];
+extern const struct file_operations *mxdma_fops_array[];
 
 /*
  * Dedicated slab cache for struct mx_transfer.  Sized exactly to the

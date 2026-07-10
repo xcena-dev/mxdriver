@@ -24,9 +24,9 @@ static_assert(MX_DMA_WAIT_RECOVERED      == 1, "trace wait_state names out of sy
 static_assert(MX_DMA_WAIT_LATE_COMPLETED == 2, "trace wait_state names out of sync");
 static_assert(MX_DMA_WAIT_ZOMBIE         == 3, "trace wait_state names out of sync");
 
-unsigned int timeout_ms = 60000; /* 60 seconds */
+static unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
-unsigned int parallel_count = 6;
+static unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
 /*
  * parallel_split_ratio: split granularity as % of one PRP list
@@ -37,9 +37,9 @@ module_param(parallel_count, int, 0644);
  *   200 : chain across two lists, half as many splits
  * Sysfs-writable (0644); applies to subsequently submitted transfers only.
  */
-unsigned int parallel_split_ratio = 50;
+static unsigned int parallel_split_ratio = 50;
 module_param(parallel_split_ratio, uint, 0644);
-unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
+static unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
 module_param(zombie_grace_ms, int, 0644);
 
 /******************************************************************************/
@@ -95,14 +95,20 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 {
 	struct mx_sg_context *ctx;
 	struct sg_table *sgt;
-	unsigned int pages_nr, offset, gup_flags = 0;
+	unsigned int offset, gup_flags = 0;
+	unsigned long pages_nr;
 	long pinned;
 	int ret;
 
 	offset = offset_in_page((unsigned long)user_addr);
-	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
-	if (!pages_nr)
+
+	/* pin_user_pages_fast() takes an int page count and total_size also sets the
+	 * SG entry length; bound the size so the page count can neither overflow int
+	 * nor be truncated below the mapping it must back. */
+	if (total_size == 0 || total_size > (size_t)INT_MAX * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
+
+	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
 
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
@@ -140,7 +146,7 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		const char *kind = pinned < 0 ? "failed" :
 				   pinned == 0 ? "none" : "partial";
 
-		pr_warn("pin_user_pages_fast %s (req=%u, got=%ld)\n", kind, pages_nr, pinned);
+		pr_warn("pin_user_pages_fast %s (req=%lu, got=%ld)\n", kind, pages_nr, pinned);
 		ret = (pinned < 0) ? (int)pinned : -EFAULT;
 		goto err;
 	}
@@ -402,7 +408,7 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
 static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
-	unsigned long left_time;
+	long left_time;
 	ssize_t size;
 	ssize_t ret;
 	int state;
@@ -440,7 +446,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				break;	/* transport dead — fail fast */
 		} while (time_before(jiffies, hard_deadline));
 	}
-	if ((long)left_time <= 0) {
+	if (left_time <= 0) {
 		unsigned long flags;
 		bool dead = lv_on &&
 			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
@@ -856,7 +862,7 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 			     uint8_t *out_status, uint64_t *out_host_addr)
 {
 	struct mx_transfer *transfer;
-	unsigned long left_time;
+	long left_time;
 
 	if (!mx_pdev->ops.create_command_passthru)
 		return -EOPNOTSUPP;
@@ -893,7 +899,7 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 
 	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 
-	if ((long)left_time <= 0) {
+	if (left_time <= 0) {
 		unsigned long flags;
 		long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
 

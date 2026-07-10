@@ -334,9 +334,14 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	if (!sq_mbox)
 		return -EINVAL;
 
-	if (send_cmd.user_addr && send_cmd.size > 0)
-		traced_write_data(mx_pdev, send_cmd.qid, send_cmd.user_addr, send_cmd.size,
-				&send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
+	if (send_cmd.user_addr && send_cmd.size > 0) {
+		ssize_t wret = traced_write_data(mx_pdev, send_cmd.qid, send_cmd.user_addr,
+				send_cmd.size, &send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
+
+		/* Don't advance the mailbox for a command whose payload never landed. */
+		if (wret < 0)
+			return wret;
+	}
 
 	mutex_lock(&sq_mbox->lock);
 	while (is_full(sq_mbox)) {
