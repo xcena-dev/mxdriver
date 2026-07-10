@@ -104,8 +104,11 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 
 	/* pin_user_pages_fast() takes an int page count and total_size also sets the
 	 * SG entry length; bound the size so the page count can neither overflow int
-	 * nor be truncated below the mapping it must back. */
-	if (total_size == 0 || total_size > (size_t)INT_MAX * PAGE_SIZE - offset)
+	 * nor be truncated below the mapping it must back. The bound also keeps
+	 * kvmalloc_array(pages_nr, sizeof(struct page *)) <= INT_MAX so it does not
+	 * WARN and fail on a large but sub-INT_MAX*PAGE_SIZE request. */
+	if (total_size == 0 ||
+	    total_size > ((size_t)INT_MAX / sizeof(struct page *)) * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
 
 	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
