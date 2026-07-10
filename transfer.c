@@ -24,9 +24,9 @@ static_assert(MX_DMA_WAIT_RECOVERED      == 1, "trace wait_state names out of sy
 static_assert(MX_DMA_WAIT_LATE_COMPLETED == 2, "trace wait_state names out of sync");
 static_assert(MX_DMA_WAIT_ZOMBIE         == 3, "trace wait_state names out of sync");
 
-unsigned int timeout_ms = 60000; /* 60 seconds */
+static unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
-unsigned int parallel_count = 6;
+static unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
 /*
  * parallel_split_ratio: split granularity as % of one PRP list
@@ -37,9 +37,9 @@ module_param(parallel_count, int, 0644);
  *   200 : chain across two lists, half as many splits
  * Sysfs-writable (0644); applies to subsequently submitted transfers only.
  */
-unsigned int parallel_split_ratio = 50;
+static unsigned int parallel_split_ratio = 50;
 module_param(parallel_split_ratio, uint, 0644);
-unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
+static unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
 module_param(zombie_grace_ms, int, 0644);
 
 /******************************************************************************/
