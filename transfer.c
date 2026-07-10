@@ -408,7 +408,7 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
 static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
-	unsigned long left_time;
+	long left_time;
 	ssize_t size;
 	ssize_t ret;
 	int state;
@@ -446,7 +446,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				break;	/* transport dead — fail fast */
 		} while (time_before(jiffies, hard_deadline));
 	}
-	if ((long)left_time <= 0) {
+	if (left_time <= 0) {
 		unsigned long flags;
 		bool dead = lv_on &&
 			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
@@ -862,7 +862,7 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 			     uint8_t *out_status, uint64_t *out_host_addr)
 {
 	struct mx_transfer *transfer;
-	unsigned long left_time;
+	long left_time;
 
 	if (!mx_pdev->ops.create_command_passthru)
 		return -EOPNOTSUPP;
@@ -899,7 +899,7 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 
 	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 
-	if ((long)left_time <= 0) {
+	if (left_time <= 0) {
 		unsigned long flags;
 		long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
 
