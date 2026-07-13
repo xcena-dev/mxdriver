@@ -536,31 +536,32 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
 	struct mx_command comm = {};
-	int ret;
 
 	if (!admin_queue || !io_queue)
 		return 0;
 
+	/*
+	 * Tear down the device-side queues best-effort. submit_sync_command()
+	 * returns true on success and false on timeout (never -EAGAIN), so a
+	 * wedged device must not abort teardown before the kthreads are stopped.
+	 */
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
 	comm.io_queue_info.cq_id = io_queue->qid;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, NULL);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to delete IO completion queue (err=%d)\n", ret);
-		return ret;
-	}
+	if (!submit_sync_command(admin_queue, &comm, NULL))
+		pr_err("Failed to delete IO completion queue\n");
 
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
 	comm.io_queue_info.sq_id = io_queue->qid;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, NULL);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to delete IO submission queue (err=%d)\n", ret);
-		return ret;
-	}
+	if (!submit_sync_command(admin_queue, &comm, NULL))
+		pr_err("Failed to delete IO submission queue\n");
 
+	/*
+	 * Must run unconditionally: the submit/complete kthreads dereference the
+	 * io_queue and writel() the BAR doorbell, both freed/unmapped as soon as
+	 * this returns. The old inverted check (which read the true success value
+	 * as an errno) returned early on every healthy teardown and left the
+	 * threads running against freed memory.
+	 */
 	mx_stop_queue_threads(mx_pdev);
 
 	return 0;
