@@ -484,6 +484,16 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		return -EINVAL;
 	}
 
+	/* cq_id is device-supplied; its doorbell lives at bar + NVME_REG_DBS +
+	 * cq_id * sizeof(u64). Reject an id whose doorbell would fall outside the
+	 * mapped BAR before configure_queue() turns it into an MMIO pointer. */
+	if (NVME_REG_DBS + ((size_t)cq_id + 1) * sizeof(uint64_t) >
+	    mx_pdev->bar_mapped_size) {
+		pr_err("IO queue id %u doorbell exceeds mapped BAR (%llu bytes)\n",
+		       cq_id, (unsigned long long)mx_pdev->bar_mapped_size);
+		return -EIO;
+	}
+
 	pr_info("IO queue created (depth=%u, sq_id=%u, cq_id=%u)\n", io_queue->depth, sq_id, cq_id);
 
 	configure_queue(mx_pdev, io_queue, cq_id);
