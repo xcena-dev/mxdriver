@@ -379,6 +379,9 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 
 	pr_info("Configuring admin queue...\n");
 
+	if (!queue)
+		return -ENOMEM;
+
 	ret = alloc_queue(dev, queue, NVME_AQ_DEPTH);
 	if (ret)
 		return ret;
@@ -445,9 +448,12 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
-	bool ret;
+	int ret;
 
 	pr_info("Configuring IO queue...\n");
+
+	if (!io_queue)
+		return -ENOMEM;
 
 	ret = alloc_queue(dev, io_queue, 256);
 	if (ret)
