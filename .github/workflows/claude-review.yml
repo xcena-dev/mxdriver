@@ -14,7 +14,7 @@ jobs:
     with:
       pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
       review_request: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
-      model: "claude-opus-4-6"
+      model: ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-4-8' }}
       additional_prompt: |
         You are a specialist reviewer for Linux kernel modules and CXL device drivers.
         mxdriver (mx_dma.ko) is an out-of-tree kernel driver that handles DMA transfers between the host and the Xcena CXL accelerator.
