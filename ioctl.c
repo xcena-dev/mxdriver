@@ -196,11 +196,15 @@ static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 	uint64_t ctx;
 	ssize_t ret;
 
+	mutex_lock(&mbox->lock);
 	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
-	if (ret <= 0)
+	if (ret <= 0) {
+		mutex_unlock(&mbox->lock);
 		return ret < 0 ? ret : -EIO;
+	}
 
 	mbox->ctx.u64 = ctx;
+	mutex_unlock(&mbox->lock);
 
 	return 0;
 }
