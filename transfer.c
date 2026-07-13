@@ -106,7 +106,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	 * SG entry length; bound the size so the page count can neither overflow int
 	 * nor be truncated below the mapping it must back. The bound also keeps
 	 * kvmalloc_array(pages_nr, sizeof(struct page *)) <= INT_MAX so it does not
-	 * WARN and fail on a large but sub-INT_MAX*PAGE_SIZE request. */
+	 * WARN and fail on a large but sub-INT_MAX*PAGE_SIZE request. The integer
+	 * division INT_MAX / sizeof(struct page *) truncates, intentionally leaving
+	 * 7 bytes of headroom below INT_MAX. */
 	if (total_size == 0 ||
 	    total_size > ((size_t)INT_MAX / sizeof(struct page *)) * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
@@ -767,8 +769,10 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 	if (descs_per_split < 1)
 		descs_per_split = 1;
 
-	/* size_t math + INT_MAX clamp: v1 (dma_size=1024) would overflow int total_descs at size > 2 TiB
-	 * (size_t intermediate lifts that ceiling to the pin_user_pages_fast int-nr_pages limit, ~8 TiB). */
+	/* size_t math + INT_MAX clamp: v1 (dma_size=1024) would overflow int total_descs at size > 2 TiB;
+	 * the size_t intermediate lifts that ceiling past the pin_user_pages_fast int-nr_pages limit
+	 * (~8 TiB), but mx_sg_context_create now caps transfers to ~1 TiB via its
+	 * kvmalloc_array(pages_nr) bound, so that cap is the effective limit. */
 	total_descs = DIV_ROUND_UP(size, dma_size);
 	raw_count = DIV_ROUND_UP(total_descs, (size_t)descs_per_split);
 	count = (int)min_t(size_t, raw_count, INT_MAX);
