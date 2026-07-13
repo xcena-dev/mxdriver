@@ -78,7 +78,7 @@ struct mx_completion
 /******************************************************************************/
 static bool is_pushable(struct mx_queue_v2 *queue)
 {
-       return (queue->sq_tail + 1) % queue->depth != queue->sq_head;
+       return (queue->sq_tail + 1) % queue->depth != READ_ONCE(queue->sq_head);
 }
 
 static bool is_popable(struct mx_queue_v2 *queue)
@@ -130,7 +130,7 @@ static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *c
 	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
 	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x res=0x%llx\n",
 			queue->cq_head, cmpl->command_id, cmpl->result);
-	queue->sq_head = cmpl->sq_head;
+	WRITE_ONCE(queue->sq_head, cmpl->sq_head);
 	update_cq_doorbell(queue);
 }
 
