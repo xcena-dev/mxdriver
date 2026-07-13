@@ -521,6 +521,11 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 
 	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev,
 			mx_pdev->page_size, mx_pdev->page_size, 0);
+	if (!mx_pdev->page_pool) {
+		pr_err("Failed to create page_pool\n");
+		ret = -ENOMEM;
+		goto out_fail;
+	}
 
 	mxdma_device_online(pdev);
 
