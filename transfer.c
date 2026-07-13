@@ -892,10 +892,28 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 	if (no_completion) {
 		/*
 		 * HW guarantees no completion for this command.  The submit
-		 * handler signals transfer->done once the command is pushed,
-		 * so we only wait for the push — no timeout/zombie handling.
+		 * handler signals transfer->done once the command is pushed, so
+		 * we only wait for the push.  Use an interruptible, bounded wait
+		 * so a wedged SQ that never pushes cannot hang the caller in an
+		 * unkillable D state.
 		 */
-		wait_for_completion(&transfer->done);
+		left_time = wait_for_completion_interruptible_timeout(&transfer->done,
+				msecs_to_jiffies(timeout_ms));
+		if (left_time <= 0) {
+			long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
+
+			/*
+			 * done is signaled only after the push, so a timeout means
+			 * the command was never pushed — reclaim it.  If it raced
+			 * and was just pushed (removal fails), the push path has
+			 * signaled done; consume that hand-off before freeing so
+			 * the submit handler is finished with the transfer.
+			 */
+			if (!mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer))
+				wait_for_completion(&transfer->done);
+			release_mx_transfer(transfer);
+			return ret;
+		}
 		release_mx_transfer(transfer);
 		return 0;
 	}
