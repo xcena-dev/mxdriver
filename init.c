@@ -48,9 +48,11 @@ out:
 static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 {
 	struct pci_dev *pdev = mx_pdev->pdev;
-	int irq = pci_irq_vector(pdev, 0);
 
-	free_irq(irq, mx_pdev);
+	if (mx_pdev->irq_requested) {
+		free_irq(pci_irq_vector(pdev, 0), mx_pdev);
+		mx_pdev->irq_requested = false;
+	}
 #ifdef CONFIG_WO_CXL
 	pci_disable_msi(pdev);
 #endif
@@ -95,7 +97,9 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 	ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
 	if (ret) {
 		pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
+		return ret;
 	}
+	mx_pdev->irq_requested = true;
 
 	return 0;
 }
@@ -521,6 +525,11 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 
 	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev,
 			mx_pdev->page_size, mx_pdev->page_size, 0);
+	if (!mx_pdev->page_pool) {
+		pr_err("Failed to create page_pool\n");
+		ret = -ENOMEM;
+		goto out_fail;
+	}
 
 	mxdma_device_online(pdev);
 

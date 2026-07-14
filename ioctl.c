@@ -196,11 +196,15 @@ static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
 	uint64_t ctx;
 	ssize_t ret;
 
+	mutex_lock(&mbox->lock);
 	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
-	if (ret <= 0)
+	if (ret <= 0) {
+		mutex_unlock(&mbox->lock);
 		return ret < 0 ? ret : -EIO;
+	}
 
 	mbox->ctx.u64 = ctx;
+	mutex_unlock(&mbox->lock);
 
 	return 0;
 }
@@ -326,12 +330,16 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	struct mx_ioctl_cmd_with_data send_cmd;
 	struct mx_mbox *sq_mbox;
 	uint64_t data_addr;
+	ssize_t cret;
 
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
 	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
 	if (!sq_mbox)
+		return -EINVAL;
+
+	if (!send_cmd.cmd)
 		return -EINVAL;
 
 	if (send_cmd.user_addr && send_cmd.size > 0) {
@@ -356,10 +364,17 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	}
 
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
-	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
 
-	traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmd, sizeof(uint64_t),
+	cret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmd, sizeof(uint64_t),
 			(loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
+	if (cret < (ssize_t)sizeof(uint64_t)) {
+		mutex_unlock(&sq_mbox->lock);
+		return cret < 0 ? cret : -EIO;
+	}
+
+	/* Advance and publish the tail only after the command word has landed;
+	 * otherwise the device would consume a stale slot on a failed write. */
+	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
 	traced_write_ctrl(mx_pdev, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
 	mutex_unlock(&sq_mbox->lock);
@@ -373,12 +388,16 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	struct mx_mbox *sq_mbox;
 	uint64_t data_addr;
 	uint32_t count = 0;
+	ssize_t wret;
 
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
 
 	sq_mbox = get_sq_mbox(mx_pdev, send_cmd.qid);
 	if (!sq_mbox)
+		return -EINVAL;
+
+	if (!send_cmd.cmds)
 		return -EINVAL;
 
 	mutex_lock(&sq_mbox->lock);
@@ -408,10 +427,16 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		count = send_cmd.nr_cmds;
 
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
-	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, count, sq_mbox->depth);
 
-	traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmds,
+	wret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmds,
 			sizeof(uint64_t) * count, (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
+	if (wret < (ssize_t)(sizeof(uint64_t) * count)) {
+		mutex_unlock(&sq_mbox->lock);
+		return wret < 0 ? wret : -EIO;
+	}
+
+	/* Advance and publish the tail only after the batch has landed. */
+	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, count, sq_mbox->depth);
 	traced_write_ctrl(mx_pdev, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
 

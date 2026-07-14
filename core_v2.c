@@ -78,7 +78,7 @@ struct mx_completion
 /******************************************************************************/
 static bool is_pushable(struct mx_queue_v2 *queue)
 {
-       return (queue->sq_tail + 1) % queue->depth != queue->sq_head;
+       return (queue->sq_tail + 1) % queue->depth != READ_ONCE(queue->sq_head);
 }
 
 static bool is_popable(struct mx_queue_v2 *queue)
@@ -130,7 +130,7 @@ static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *c
 	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
 	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x res=0x%llx\n",
 			queue->cq_head, cmpl->command_id, cmpl->result);
-	queue->sq_head = cmpl->sq_head;
+	WRITE_ONCE(queue->sq_head, cmpl->sq_head);
 	update_cq_doorbell(queue);
 }
 
@@ -379,6 +379,9 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 
 	pr_info("Configuring admin queue...\n");
 
+	if (!queue)
+		return -ENOMEM;
+
 	ret = alloc_queue(dev, queue, NVME_AQ_DEPTH);
 	if (ret)
 		return ret;
@@ -398,7 +401,7 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
+static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
 	struct mx_completion cmpl;
 	int timeout = 500;
@@ -445,9 +448,12 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
-	bool ret;
+	int ret;
 
 	pr_info("Configuring IO queue...\n");
+
+	if (!io_queue)
+		return -ENOMEM;
 
 	ret = alloc_queue(dev, io_queue, 256);
 	if (ret)
@@ -456,8 +462,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
-	ret = submit_sync_command(admin_queue, &comm, &result);
-	if (!ret) {
+	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO completion queue\n");
 		return -EIO;
 	}
@@ -466,8 +471,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
-	ret = submit_sync_command(admin_queue, &comm, &result);
-	if (!ret) {
+	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
 		return -EIO;
 	}
@@ -476,6 +480,16 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	if (cq_id != sq_id) {
 		pr_err("Failed to create IO queue (cq_id=%d, sq_id=%d)\n", cq_id, sq_id);
 		return -EINVAL;
+	}
+
+	/* cq_id is device-supplied; its doorbell lives at bar + NVME_REG_DBS +
+	 * cq_id * sizeof(u64). Reject an id whose doorbell would fall outside the
+	 * mapped BAR before configure_queue() turns it into an MMIO pointer. */
+	if (NVME_REG_DBS + ((size_t)cq_id + 1) * sizeof(uint64_t) >
+	    mx_pdev->bar_mapped_size) {
+		pr_err("IO queue id %u doorbell exceeds mapped BAR (%llu bytes)\n",
+		       cq_id, (unsigned long long)mx_pdev->bar_mapped_size);
+		return -EIO;
 	}
 
 	pr_info("IO queue created (depth=%u, sq_id=%u, cq_id=%u)\n", io_queue->depth, sq_id, cq_id);
@@ -520,31 +534,30 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
 	struct mx_command comm = {};
-	int ret;
 
 	if (!admin_queue || !io_queue)
 		return 0;
 
+	/*
+	 * Tear down the device-side queues best-effort. submit_sync_command()
+	 * returns true on success and false on timeout (never -EAGAIN), so a
+	 * wedged device must not abort teardown before the kthreads are stopped.
+	 */
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
 	comm.io_queue_info.cq_id = io_queue->qid;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, NULL);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to delete IO completion queue (err=%d)\n", ret);
-		return ret;
-	}
+	if (!submit_sync_command(admin_queue, &comm, NULL))
+		pr_err("Failed to delete IO completion queue\n");
 
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
 	comm.io_queue_info.sq_id = io_queue->qid;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, NULL);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to delete IO submission queue (err=%d)\n", ret);
-		return ret;
-	}
+	if (!submit_sync_command(admin_queue, &comm, NULL))
+		pr_err("Failed to delete IO submission queue\n");
 
+	/*
+	 * Must run unconditionally: the submit/complete kthreads dereference the
+	 * io_queue and writel() the BAR doorbell, both freed/unmapped as soon as
+	 * this returns.
+	 */
 	mx_stop_queue_threads(mx_pdev);
 
 	return 0;

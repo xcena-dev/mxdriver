@@ -104,8 +104,13 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 
 	/* pin_user_pages_fast() takes an int page count and total_size also sets the
 	 * SG entry length; bound the size so the page count can neither overflow int
-	 * nor be truncated below the mapping it must back. */
-	if (total_size == 0 || total_size > (size_t)INT_MAX * PAGE_SIZE - offset)
+	 * nor be truncated below the mapping it must back. The bound also keeps
+	 * kvmalloc_array(pages_nr, sizeof(struct page *)) <= INT_MAX so it does not
+	 * WARN and fail on a large but sub-INT_MAX*PAGE_SIZE request. The integer
+	 * division INT_MAX / sizeof(struct page *) truncates, intentionally leaving
+	 * 7 bytes of headroom below INT_MAX. */
+	if (total_size == 0 ||
+	    total_size > ((size_t)INT_MAX / sizeof(struct page *)) * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
 
 	pages_nr = DIV_ROUND_UP(offset + total_size, PAGE_SIZE);
@@ -764,8 +769,10 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 	if (descs_per_split < 1)
 		descs_per_split = 1;
 
-	/* size_t math + INT_MAX clamp: v1 (dma_size=1024) would overflow int total_descs at size > 2 TiB
-	 * (size_t intermediate lifts that ceiling to the pin_user_pages_fast int-nr_pages limit, ~8 TiB). */
+	/* size_t math + INT_MAX clamp: v1 (dma_size=1024) would overflow int total_descs at size > 2 TiB;
+	 * the size_t intermediate lifts that ceiling past the pin_user_pages_fast int-nr_pages limit
+	 * (~8 TiB), but mx_sg_context_create now caps transfers to ~1 TiB via its
+	 * kvmalloc_array(pages_nr) bound, so that cap is the effective limit. */
 	total_descs = DIV_ROUND_UP(size, dma_size);
 	raw_count = DIV_ROUND_UP(total_descs, (size_t)descs_per_split);
 	count = (int)min_t(size_t, raw_count, INT_MAX);
@@ -889,10 +896,28 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 	if (no_completion) {
 		/*
 		 * HW guarantees no completion for this command.  The submit
-		 * handler signals transfer->done once the command is pushed,
-		 * so we only wait for the push — no timeout/zombie handling.
+		 * handler signals transfer->done once the command is pushed, so
+		 * we only wait for the push.  Use an interruptible, bounded wait
+		 * so a wedged SQ that never pushes cannot hang the caller in an
+		 * unkillable D state.
 		 */
-		wait_for_completion(&transfer->done);
+		left_time = wait_for_completion_interruptible_timeout(&transfer->done,
+				msecs_to_jiffies(timeout_ms));
+		if (left_time <= 0) {
+			long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
+
+			/*
+			 * done is signaled only after the push, so a timeout means
+			 * the command was never pushed — reclaim it.  If it raced
+			 * and was just pushed (removal fails), the push path has
+			 * signaled done; consume that hand-off before freeing so
+			 * the submit handler is finished with the transfer.
+			 */
+			if (!mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer))
+				wait_for_completion(&transfer->done);
+			release_mx_transfer(transfer);
+			return ret;
+		}
 		release_mx_transfer(transfer);
 		return 0;
 	}

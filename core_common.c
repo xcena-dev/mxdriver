@@ -13,7 +13,7 @@
 /******************************************************************************/
 /* Descriptor list utilities                                                  */
 /******************************************************************************/
-int mx_get_list_count(int total_desc_cnt, int descs_per_list)
+int mx_get_list_count(size_t total_desc_cnt, int descs_per_list)
 {
 	int list_cnt = 1;
 
@@ -65,11 +65,11 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
 /* Count PRP descriptors needed for byte_size bytes starting at (sg, intra_off); caller must
  * pre-locate via mx_sg_locate.  skip_first subtracts one (when caller stashes the first DMA
  * address inline in prp_entry1).  sg/intra_off are by-value so caller's walking state survives. */
-int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
-			    size_t byte_size, size_t dma_size, bool skip_first)
+size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
+			       size_t byte_size, size_t dma_size, bool skip_first)
 {
 	size_t remaining = byte_size;
-	int total = 0;
+	size_t total = 0;
 
 	if (byte_size == 0)
 		return 0;
@@ -111,7 +111,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	size_t entry_avail;
 	size_t len;
 	uint64_t *desc;
-	int total_desc_cnt, list_cnt, list_idx, desc_idx;
+	size_t total_desc_cnt;
+	int list_cnt, list_idx, desc_idx;
 	int ret;
 
 	ret = mx_sg_locate(sgt, byte_offset, &sg, &intra_off);
@@ -121,8 +122,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	}
 
 	total_desc_cnt = mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
-	if (total_desc_cnt <= 0) {
-		pr_warn("desc count <= 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
+	if (total_desc_cnt == 0) {
+		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
 		return 0;
 	}
 	list_cnt = mx_get_list_count(total_desc_cnt, descs_per_list);

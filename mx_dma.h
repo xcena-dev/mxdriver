@@ -322,6 +322,10 @@ struct mx_pci_dev {
 	void __iomem *bar;
 	resource_size_t bar_mapped_size;
 
+	/* Set once request_threaded_irq() succeeds so teardown only frees an IRQ
+	 * that was actually requested. */
+	bool irq_requested;
+
 	struct mutex bar_mmap_lock;
 	struct address_space *mmap_mapping;
 
@@ -396,9 +400,9 @@ int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, in
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
-int mx_get_list_count(int total_desc_cnt, int descs_per_list);
-int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
-			    size_t dma_size, bool skip_first);
+int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
+size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			       size_t dma_size, bool skip_first);
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 			   size_t dma_size, int descs_per_list, bool skip_first_entry);
 
