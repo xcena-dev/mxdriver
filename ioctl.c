@@ -367,9 +367,9 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 
 	cret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmd, sizeof(uint64_t),
 			(loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
-	if (cret < 0) {
+	if (cret < (ssize_t)sizeof(uint64_t)) {
 		mutex_unlock(&sq_mbox->lock);
-		return cret;
+		return cret < 0 ? cret : -EIO;
 	}
 
 	/* Advance and publish the tail only after the command word has landed;
@@ -430,9 +430,9 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	wret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmds,
 			sizeof(uint64_t) * count, (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
-	if (wret < 0) {
+	if (wret < (ssize_t)(sizeof(uint64_t) * count)) {
 		mutex_unlock(&sq_mbox->lock);
-		return wret;
+		return wret < 0 ? wret : -EIO;
 	}
 
 	/* Advance and publish the tail only after the batch has landed. */
