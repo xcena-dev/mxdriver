@@ -401,7 +401,7 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
+static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
 	struct mx_completion cmpl;
 	int timeout = 500;
@@ -462,8 +462,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
-	ret = submit_sync_command(admin_queue, &comm, &result);
-	if (!ret) {
+	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO completion queue\n");
 		return -EIO;
 	}
@@ -472,8 +471,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
-	ret = submit_sync_command(admin_queue, &comm, &result);
-	if (!ret) {
+	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
 		return -EIO;
 	}
@@ -558,9 +556,7 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	/*
 	 * Must run unconditionally: the submit/complete kthreads dereference the
 	 * io_queue and writel() the BAR doorbell, both freed/unmapped as soon as
-	 * this returns. The old inverted check (which read the true success value
-	 * as an errno) returned early on every healthy teardown and left the
-	 * threads running against freed memory.
+	 * this returns.
 	 */
 	mx_stop_queue_threads(mx_pdev);
 
