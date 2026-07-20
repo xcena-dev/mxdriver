@@ -77,9 +77,20 @@ echo mx_dma | tee /etc/modules-load.d/mx_dma.conf
 
 INITRAMFS_BACKEND=""
 
+# Remove the obsolete devdax permission helper left by older installs. The usual
+# upgrade path re-runs install.sh (not uninstall.sh), so without this the stale
+# udev rule survives and keeps re-applying 0666 to /dev/dax*.
+if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
+      || -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
+    rm -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
+    rm -f /usr/local/sbin/xcena_set_devdax_perm
+    udevadm control --reload-rules
+    echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
+fi
+
 # CXL-only setup. WO_CXL=1 builds use pci_register_driver and do not depend on
-# the PCI bus_notifier ordering, so none of the softdep / initramfs / udev
-# bits below apply there.
+# the PCI bus_notifier ordering, so none of the softdep / initramfs bits
+# below apply there.
 if [[ "$HAS_CXL" == "true" ]]; then
     # Reverse softdep: cxl_pci modalias path must pull mx_dma in first so the
     # PCI bus notifier is registered before cxl_pci binds XCENA devices.
@@ -105,12 +116,6 @@ EOF
     else
         echo "[INFO] No supported initramfs configuration path found, skipping regeneration."
     fi
-
-    echo "[INFO] Installing xcena_set_devdax_perm for CXL support..."
-    install -m 0755 config/xcena_set_devdax_perm /usr/local/sbin/xcena_set_devdax_perm
-    install -m 0644 config/99-xcena_set_devdax_perm.rules /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
-    udevadm control --reload-rules
-    echo "[INFO] xcena_set_devdax_perm installation completed."
 fi
 
 # Regenerate initramfs once at the end so it picks up softdep ordering and,
