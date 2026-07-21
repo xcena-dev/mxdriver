@@ -411,10 +411,31 @@ static bool mx_transfer_remove_from_sq(struct mx_queue *queue, struct mx_transfe
 
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
+
+/* Read size before teardown frees the transfer. */
+static ssize_t mx_transfer_teardown_done(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+{
+	ssize_t size = transfer->size;
+
+	if (transfer->is_sg)
+		mx_transfer_destroy_sg(mx_pdev, transfer);
+	else
+		mx_transfer_destroy_ctrl(transfer);
+	return size;
+}
+
+/* Never reached HW: release rather than tear down a submitted command. */
+static void mx_transfer_teardown_recovered(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+{
+	if (transfer->is_sg)
+		mx_transfer_destroy_sg(mx_pdev, transfer);
+	else
+		release_mx_transfer(transfer);
+}
+
 static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	long left_time;
-	ssize_t size;
 	ssize_t ret;
 	int state;
 	/* Capture id up-front: destroy/release below frees the transfer. */
@@ -451,13 +472,19 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 				break;	/* transport dead — fail fast */
 		} while (time_before(jiffies, hard_deadline));
 	}
-	if (left_time <= 0) {
+	if (left_time > 0) {
+		ret = mx_transfer_teardown_done(mx_pdev, transfer);
+		state = MX_DMA_WAIT_COMPLETED;
+		goto out;
+	}
+
+	{
 		unsigned long flags;
 		bool dead = lv_on &&
 			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
-		/* Report DEAD to the caller now; the buffer is still reclaimed lazily
+		/* Fail the caller now; the buffer is still reclaimed lazily
 		 * via the zombie path since the device may yet touch it. */
-		ssize_t fail_ret = dead ? -EIO : 0;
+		ssize_t fail_ret = dead ? -EIO : (left_time == 0 ? -ETIMEDOUT : -EINTR);
 
 		if (left_time == 0) {
 			if (dead)
@@ -472,11 +499,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
 					transfer->id, (uint64_t)transfer->size, transfer->dir);
 
+		/* Not yet pushed to HW: recover cleanly instead of parking a zombie. */
 		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer)) {
-			if (transfer->is_sg)
-				mx_transfer_destroy_sg(mx_pdev, transfer);
-			else
-				release_mx_transfer(transfer);
+			mx_transfer_teardown_recovered(mx_pdev, transfer);
 			ret = fail_ret;
 			state = MX_DMA_WAIT_RECOVERED;
 			goto out;
@@ -487,15 +512,9 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		 * completion before teardown; a dead transport fails now.
 		 */
 		if (!dead) {
-			left_time = wait_for_completion_timeout(&transfer->done,
-								msecs_to_jiffies(1000));
-			if (left_time > 0) {
-				size = transfer->size;
-				if (transfer->is_sg)
-					mx_transfer_destroy_sg(mx_pdev, transfer);
-				else
-					mx_transfer_destroy_ctrl(transfer);
-				ret = size;
+			if (wait_for_completion_timeout(&transfer->done,
+						msecs_to_jiffies(1000)) > 0) {
+				ret = mx_transfer_teardown_done(mx_pdev, transfer);
 				state = MX_DMA_WAIT_LATE_COMPLETED;
 				goto out;
 			}
@@ -516,16 +535,6 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		state = MX_DMA_WAIT_ZOMBIE;
 		goto out;
 	}
-
-	size = transfer->size;
-
-	if (transfer->is_sg)
-		mx_transfer_destroy_sg(mx_pdev, transfer);
-	else
-		mx_transfer_destroy_ctrl(transfer);
-
-	ret = size;
-	state = MX_DMA_WAIT_COMPLETED;
 out:
 	trace_mx_dma_xfer_wait_exit(mx_pdev->dev_id, xfer_id, ret, state);
 	return ret;
