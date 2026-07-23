@@ -8,6 +8,14 @@
 #include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/version.h>
+
+/* RHEL ships a 5.14 kernel but backports later mainline APIs, so a bare
+ * LINUX_VERSION_CODE test picks the wrong branch; guards below also gate on
+ * RHEL_RELEASE_CODE, stubbed here to lose every comparison off RHEL. */
+#ifndef RHEL_RELEASE_CODE
+#define RHEL_RELEASE_CODE 0
+#define RHEL_RELEASE_VERSION(a, b) 1
+#endif
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/aer.h>
