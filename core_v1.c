@@ -429,7 +429,7 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	}
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
 	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 #else
 	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
