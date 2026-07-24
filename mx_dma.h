@@ -14,6 +14,10 @@
  * RHEL_RELEASE_CODE, stubbed here to lose every comparison off RHEL. */
 #ifndef RHEL_RELEASE_CODE
 #define RHEL_RELEASE_CODE 0
+#endif
+#ifndef RHEL_RELEASE_VERSION
+/* Sentinel valid only against RHEL_RELEASE_CODE==0 (0>=1 false, 0<1 true);
+ * never compare two RHEL_RELEASE_VERSION() values while this stub is active. */
 #define RHEL_RELEASE_VERSION(a, b) 1
 #endif
 #include <linux/errno.h>
