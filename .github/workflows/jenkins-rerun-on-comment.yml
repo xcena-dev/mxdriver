@@ -39,7 +39,7 @@ jobs:
     needs: check-comment
     uses: xcena-dev/.github/.github/workflows/jenkins-trigger-on-pr-comment.yml@main
     with:
-      jenkins_url: 'http://192.168.57.60:8080'
+      jenkins_url: 'http://192.168.97.60:8080'
       job_name: 'sw_xcena_mxdriver_multibranch/job/PR-${{ github.event.issue.number }}'
       job_view: 'view/XCENA_MXDRIVER'
       job_params_json: '{}'
