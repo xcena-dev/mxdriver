@@ -551,7 +551,7 @@ static const struct pci_device_id pci_ids[] = {
 MODULE_DEVICE_TABLE(pci, pci_ids);
 
 #ifndef CONFIG_WO_CXL
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
 static int match_mem_prefix(struct device *dev, void *data)
 #else
 static int match_mem_prefix(struct device *dev, const void *data)
@@ -659,7 +659,7 @@ static struct pci_driver pci_driver = {
 };
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 6)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 6) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
 static char *mxdma_devnode(struct device *dev, umode_t *mode)
 #else
 static char *mxdma_devnode(const struct device *dev, umode_t *mode)
@@ -715,7 +715,7 @@ static struct notifier_block mxdma_pci_notifier = {
 
 static int mxdma_init(void)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 3)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 3) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
 	mxdma_class = class_create(THIS_MODULE, MXDMA_NODE_NAME);
 #else
 	mxdma_class = class_create(MXDMA_NODE_NAME);
