@@ -19,6 +19,30 @@ else
     echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
 fi
 
+# Kernel to build for. Installing onto this machine needs neither input below; a
+# caller installing for a different kernel (image build, or a locally built tree)
+# gives one of them:
+#
+#   XCENA_TARGET_KDIR  kernel build tree. Default /lib/modules/<version>/build,
+#                      the path DKMS and the distro header packages use.
+#   XCENA_TARGET_KVER  kernel version. Names the DKMS registration, the install
+#                      path, depmod and initramfs. Read from the tree when only
+#                      XCENA_TARGET_KDIR is given.
+KVER="${XCENA_TARGET_KVER:-}"
+KDIR="${XCENA_TARGET_KDIR:-}"
+if [[ -n "$KDIR" && -z "$KVER" ]]; then
+    KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
+    [[ -n "$KVER" ]] || { echo "[ERROR] cannot read kernelrelease from '${KDIR}'"; exit 1; }
+fi
+[[ -n "$KVER" ]] || KVER="$(uname -r)"
+[[ -n "$KDIR" ]] || KDIR="/lib/modules/${KVER}/build"
+if [[ ! -e "$KDIR" ]]; then
+    echo "[ERROR] kernel build tree not found: ${KDIR}"
+    echo "        install linux-headers-${KVER}, or set XCENA_TARGET_KDIR to the tree."
+    exit 1
+fi
+echo "[INFO] target kernel: ${KVER} (build tree: ${KDIR})"
+
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
 
@@ -35,16 +59,25 @@ install_dkms() {
     # Force-clean DKMS tree in case remove left stale entries
     rm -rf "/var/lib/dkms/${PACKAGE_NAME}" 2>/dev/null || true
 
-    # Copy source to DKMS source tree (clean first to exclude build artifacts like mx_dma.mod.c)
+    # Copy source to DKMS source tree (clean first to exclude build artifacts like
+    # mx_dma.mod.c). The clean needs the target kernel's build tree too: with the
+    # default it runs against the running kernel, which during an image build is a
+    # kernel absent from this root, so the clean silently does nothing and the
+    # artifacts get copied.
     rm -rf "${SRC_DIR}"
     mkdir -p "${SRC_DIR}/scripts"
-    make clean 2>/dev/null || true
+    make BUILDSYSTEM_DIR="$KDIR" clean 2>/dev/null || true
     cp -a Makefile dkms.conf *.c *.h "${SRC_DIR}/"
     cp -a scripts/dkms-post-install.sh "${SRC_DIR}/scripts/"
 
+    # DKMS resolves the tree as /lib/modules/<kver>/build on its own, so only a
+    # tree outside that path has to be spelled out.
+    local dkms_src=()
+    [[ "$KDIR" != "/lib/modules/${KVER}/build" ]] && dkms_src=(--kernelsourcedir "$KDIR")
+
     dkms add "${PACKAGE_NAME}/${PACKAGE_VERSION}"
-    dkms build "${PACKAGE_NAME}/${PACKAGE_VERSION}"
-    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}" --force
+    dkms build "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" "${dkms_src[@]}"
+    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" "${dkms_src[@]}" --force
 
     echo "[INFO] DKMS installation completed. Module will auto-rebuild on kernel upgrades."
 }
@@ -58,11 +91,11 @@ install_legacy() {
     fi
 
     # shellcheck disable=SC2086
-    make $MAKEVAR clean
+    make $MAKEVAR BUILDSYSTEM_DIR="$KDIR" clean
     # shellcheck disable=SC2086
-    make $MAKEVAR -j"$(nproc)" install
+    make $MAKEVAR BUILDSYSTEM_DIR="$KDIR" -j"$(nproc)" install
 
-    depmod -a
+    depmod -a "${KVER}"
 }
 
 # Install module (prefer DKMS, fallback to legacy)
@@ -84,7 +117,10 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
       || -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     rm -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
     rm -f /usr/local/sbin/xcena_set_devdax_perm
-    udevadm control --reload-rules
+    # Best-effort: udevd is not running during an image build, and what a booted
+    # system reads is the rule file, which is already gone by this point.
+    udevadm control --reload-rules 2>/dev/null \
+        || echo "[INFO] udevd not running; rule change applies at boot."
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
@@ -122,8 +158,8 @@ fi
 # where configured, the bundled mx_dma module.
 if [[ "$INITRAMFS_BACKEND" == "initramfs-tools" ]]; then
     echo "[INFO] Updating initramfs..."
-    update-initramfs -u -k "$(uname -r)"
+    update-initramfs -u -k "${KVER}"
 elif [[ "$INITRAMFS_BACKEND" == "dracut" ]]; then
     echo "[INFO] Updating initramfs via dracut..."
-    dracut --force --kver "$(uname -r)"
+    dracut --force --kver "${KVER}"
 fi
