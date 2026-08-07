@@ -64,17 +64,24 @@ if [[ -n "${XCENA_TARGET_HAS_CXL:-}" ]]; then
         *) echo "[ERROR] XCENA_TARGET_HAS_CXL must be 'true' or 'false', got '${XCENA_TARGET_HAS_CXL}'"; exit 1 ;;
     esac
     echo "[INFO] target CXL: ${XCENA_TARGET_HAS_CXL} (given)"
-elif [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
-    XCENA_TARGET_HAS_CXL=true
-    echo "[INFO] CEDT found – building **with** CXL support."
 else
-    XCENA_TARGET_HAS_CXL=false
-    echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
-    if [[ "$KVER" != "$(uname -r)" ]]; then
-        # The table just read belongs to this machine, and the module is being
-        # built for a kernel that runs elsewhere. Whoever asked for that kernel
-        # is the one who knows whether the target has CXL.
-        echo "[WARN] that table is this machine's, and the target is another kernel."
+    if [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
+        XCENA_TARGET_HAS_CXL=true
+        echo "[INFO] CEDT found – building **with** CXL support."
+    else
+        XCENA_TARGET_HAS_CXL=false
+        echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
+    fi
+    # The table just read belongs to this machine. A caller who named a target
+    # kernel is installing for another machine, so it is not the target's table --
+    # and either answer above is then a guess about the wrong hardware.
+    #
+    # Ask whether a target was named rather than comparing $KVER against
+    # $(uname -r): an image is assembled under chroot/nspawn, neither of which
+    # changes what uname reports, so that comparison goes quiet whenever the two
+    # kernel releases happen to coincide.
+    if [[ -n "${XCENA_TARGET_KVER:-}${XCENA_TARGET_KDIR:-}" ]]; then
+        echo "[WARN] that table is this machine's, and the target is elsewhere."
         echo "       set XCENA_TARGET_HAS_CXL to state the target's hardware."
     fi
 fi
