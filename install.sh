@@ -11,14 +11,6 @@ PACKAGE_VERSION=$(sed -n 's/^PACKAGE_VERSION="\?\([^"]*\)"\?$/\1/p' dkms.conf)
 [[ -n "${PACKAGE_NAME}" && -n "${PACKAGE_VERSION}" ]] || { echo "[ERROR] Failed to parse dkms.conf"; exit 1; }
 SRC_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 
-HAS_CXL=false
-if [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
-    HAS_CXL=true
-    echo "[INFO] CEDT found – building **with** CXL support."
-else
-    echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
-fi
-
 # Kernel to build for. Installing onto this machine needs neither input below; a
 # caller installing for a different kernel (image build, or a locally built tree)
 # gives one of them:
@@ -28,11 +20,23 @@ fi
 #   XCENA_TARGET_KVER  kernel version. Names the DKMS registration, the install
 #                      path, depmod and initramfs. Read from the tree when only
 #                      XCENA_TARGET_KDIR is given.
+#
+# Giving both is allowed, but they have to agree: the module is built from the
+# tree and registered under the version, so a mismatch installs a module that
+# cannot load (DKMS), or installs it into a directory depmod never indexes
+# (legacy path) -- both silently.
 KVER="${XCENA_TARGET_KVER:-}"
 KDIR="${XCENA_TARGET_KDIR:-}"
-if [[ -n "$KDIR" && -z "$KVER" ]]; then
-    KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
-    [[ -n "$KVER" ]] || { echo "[ERROR] cannot read kernelrelease from '${KDIR}'"; exit 1; }
+if [[ -n "$KDIR" ]]; then
+    TREE_KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
+    if [[ -z "$KVER" ]]; then
+        KVER="$TREE_KVER"
+        [[ -n "$KVER" ]] || { echo "[ERROR] cannot read kernelrelease from '${KDIR}'"; exit 1; }
+    elif [[ -n "$TREE_KVER" && "$TREE_KVER" != "$KVER" ]]; then
+        echo "[ERROR] XCENA_TARGET_KVER='${KVER}' disagrees with the tree at '${KDIR}'"
+        echo "        (that tree builds '${TREE_KVER}'). Give one of them, or matching values."
+        exit 1
+    fi
 fi
 [[ -n "$KVER" ]] || KVER="$(uname -r)"
 [[ -n "$KDIR" ]] || KDIR="/lib/modules/${KVER}/build"
@@ -42,6 +46,22 @@ if [[ ! -e "$KDIR" ]]; then
     exit 1
 fi
 echo "[INFO] target kernel: ${KVER} (build tree: ${KDIR})"
+
+# CXL support is the build default; WO_CXL=1 is the opt-out for a machine that
+# has no CXL. The evidence for opting out is this machine's ACPI table, so it
+# only speaks for the machine running the installer. Installing for another
+# kernel means the target is elsewhere and its tables are not visible here, so
+# the default stands -- reading the builder's table there would put a driver in
+# the image chosen by whichever machine happened to build it.
+HAS_CXL=true
+if [[ "$KVER" != "$(uname -r)" ]]; then
+    echo "[INFO] installing for another kernel – building **with** CXL support (this machine's ACPI tables do not describe the target)."
+elif [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
+    echo "[INFO] CEDT found – building **with** CXL support."
+else
+    HAS_CXL=false
+    echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
+fi
 
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
@@ -76,8 +96,8 @@ install_dkms() {
     [[ "$KDIR" != "/lib/modules/${KVER}/build" ]] && dkms_src=(--kernelsourcedir "$KDIR")
 
     dkms add "${PACKAGE_NAME}/${PACKAGE_VERSION}"
-    dkms build "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" "${dkms_src[@]}"
-    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" "${dkms_src[@]}" --force
+    dkms build "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" ${dkms_src[@]+"${dkms_src[@]}"}
+    dkms install "${PACKAGE_NAME}/${PACKAGE_VERSION}" -k "${KVER}" ${dkms_src[@]+"${dkms_src[@]}"} --force
 
     echo "[INFO] DKMS installation completed. Module will auto-rebuild on kernel upgrades."
 }
