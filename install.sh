@@ -47,20 +47,33 @@ if [[ ! -e "$KDIR" ]]; then
 fi
 echo "[INFO] target kernel: ${KVER} (build tree: ${KDIR})"
 
-# CXL support is the build default; WO_CXL=1 is the opt-out for a machine that
-# has no CXL. The evidence for opting out is this machine's ACPI table, so it
-# only speaks for the machine running the installer. Installing for another
-# kernel means the target is elsewhere and its tables are not visible here, so
-# the default stands -- reading the builder's table there would put a driver in
-# the image chosen by whichever machine happened to build it.
-HAS_CXL=true
-if [[ "$KVER" != "$(uname -r)" ]]; then
-    echo "[INFO] installing for another kernel – building **with** CXL support (this machine's ACPI tables do not describe the target)."
+# Whether the target has CXL, which selects WO_CXL. Told the same way as the
+# kernel above:
+#
+#   XCENA_TARGET_HAS_CXL  true | false. Given by a caller installing elsewhere,
+#                         which is the only side that knows the target's
+#                         hardware. Without it the installer reads this
+#                         machine's ACPI table, which is the answer whenever it
+#                         runs on the target.
+if [[ -n "${XCENA_TARGET_HAS_CXL:-}" ]]; then
+    case "$XCENA_TARGET_HAS_CXL" in
+        true|false) HAS_CXL="$XCENA_TARGET_HAS_CXL" ;;
+        *) echo "[ERROR] XCENA_TARGET_HAS_CXL must be 'true' or 'false', got '${XCENA_TARGET_HAS_CXL}'"; exit 1 ;;
+    esac
+    echo "[INFO] target CXL: ${HAS_CXL} (given)"
 elif [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
+    HAS_CXL=true
     echo "[INFO] CEDT found – building **with** CXL support."
 else
     HAS_CXL=false
     echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
+    if [[ "$KVER" != "$(uname -r)" ]]; then
+        # The table just read belongs to this machine, and the module is being
+        # built for a kernel that runs elsewhere. Whoever asked for that kernel
+        # is the one who knows whether the target has CXL.
+        echo "[WARN] that table is this machine's, and the target is another kernel."
+        echo "       set XCENA_TARGET_HAS_CXL to state the target's hardware."
+    fi
 fi
 
 install_dkms() {
