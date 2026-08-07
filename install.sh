@@ -79,6 +79,16 @@ fi
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
 
+    # dkms.conf builds the make argument itself and, left alone, decides it from
+    # this machine's CEDT table -- the very reading that is wrong when the target
+    # is elsewhere. Hand it the resolved answer. Empty means "with CXL", which is
+    # the build default.
+    if [[ "$HAS_CXL" == "true" ]]; then
+        export XCENA_WO_CXL=""
+    else
+        export XCENA_WO_CXL="WO_CXL=1"
+    fi
+
     # Remove legacy-installed module to avoid DKMS diff warning
     for kdir in /lib/modules/*/updates; do
         rm -f "${kdir}"/mx_dma.ko* 2>/dev/null || true
