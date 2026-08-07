@@ -55,17 +55,20 @@ echo "[INFO] target kernel: ${KVER} (build tree: ${KDIR})"
 #                         hardware. Without it the installer reads this
 #                         machine's ACPI table, which is the answer whenever it
 #                         runs on the target.
+#
+# Resolved once here and exported, because dkms.conf reads the same variable when
+# it assembles the make arguments.
 if [[ -n "${XCENA_TARGET_HAS_CXL:-}" ]]; then
     case "$XCENA_TARGET_HAS_CXL" in
-        true|false) HAS_CXL="$XCENA_TARGET_HAS_CXL" ;;
+        true|false) ;;
         *) echo "[ERROR] XCENA_TARGET_HAS_CXL must be 'true' or 'false', got '${XCENA_TARGET_HAS_CXL}'"; exit 1 ;;
     esac
-    echo "[INFO] target CXL: ${HAS_CXL} (given)"
+    echo "[INFO] target CXL: ${XCENA_TARGET_HAS_CXL} (given)"
 elif [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
-    HAS_CXL=true
+    XCENA_TARGET_HAS_CXL=true
     echo "[INFO] CEDT found – building **with** CXL support."
 else
-    HAS_CXL=false
+    XCENA_TARGET_HAS_CXL=false
     echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
     if [[ "$KVER" != "$(uname -r)" ]]; then
         # The table just read belongs to this machine, and the module is being
@@ -75,19 +78,10 @@ else
         echo "       set XCENA_TARGET_HAS_CXL to state the target's hardware."
     fi
 fi
+export XCENA_TARGET_HAS_CXL
 
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
-
-    # dkms.conf builds the make argument itself and, left alone, decides it from
-    # this machine's CEDT table -- the very reading that is wrong when the target
-    # is elsewhere. Hand it the resolved answer. Empty means "with CXL", which is
-    # the build default.
-    if [[ "$HAS_CXL" == "true" ]]; then
-        export XCENA_WO_CXL=""
-    else
-        export XCENA_WO_CXL="WO_CXL=1"
-    fi
 
     # Remove legacy-installed module to avoid DKMS diff warning
     for kdir in /lib/modules/*/updates; do
@@ -129,7 +123,7 @@ install_legacy() {
     echo "[INFO] dkms not found – falling back to legacy install."
 
     MAKEVAR=""
-    if [[ "$HAS_CXL" == "false" ]]; then
+    if [[ "$XCENA_TARGET_HAS_CXL" == "false" ]]; then
         MAKEVAR="WO_CXL=1"
     fi
 
@@ -170,7 +164,7 @@ fi
 # CXL-only setup. WO_CXL=1 builds use pci_register_driver and do not depend on
 # the PCI bus_notifier ordering, so none of the softdep / initramfs bits
 # below apply there.
-if [[ "$HAS_CXL" == "true" ]]; then
+if [[ "$XCENA_TARGET_HAS_CXL" == "true" ]]; then
     # Reverse softdep: cxl_pci modalias path must pull mx_dma in first so the
     # PCI bus notifier is registered before cxl_pci binds XCENA devices.
     # Complements MODULE_SOFTDEP("post: cxl_pci") in the driver, which only
