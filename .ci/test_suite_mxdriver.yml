@@ -18,15 +18,20 @@ targets:
     - push:
         - { src: tests,   dst: tests }
         - { src: driver,  dst: driver }
+    # sdk_release keeps the driver at driver/mxdriver, alongside driver/ccma;
+    # before that move it was driver itself. Take whichever of the two carries
+    # the installer, so this runs against either layout.
+    #
+    # Anchored at $HOME rather than the current directory: these blocks are
+    # concatenated into one script, so a relative cd in the first one decides
+    # where the second starts.
     - uninstall: |
         set -e
-        cd driver
+        cd "$([ -f "$HOME/driver/mxdriver/uninstall.sh" ] && echo "$HOME/driver/mxdriver" || echo "$HOME/driver")"
         sudo ./uninstall.sh
-        cd ..
     - install: |
         set -e
-        cd driver
+        cd "$([ -f "$HOME/driver/mxdriver/install.sh" ] && echo "$HOME/driver/mxdriver" || echo "$HOME/driver")"
         sudo ./install.sh
-        cd ..
     - commons:
         - timeout: 3600
