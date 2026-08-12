@@ -274,6 +274,10 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 
 	/* Branch on the DMA-side entry count, not host page count (alignments can differ). */
 	desc_cnt = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, false);
+	if (desc_cnt == 0) {
+		pr_warn("desc count is 0 (id=%u)\n", transfer->id);
+		return NULL;
+	}
 
 	if (desc_cnt == 1) {
 		comm->prp_entry2 = 0;
