@@ -226,6 +226,11 @@ static const struct mx_queue_ops v2_queue_ops = {
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
+/* Host-page slicing (transfer.c, mx_parallel_count_for) and PRP chunking must agree; other
+ * combinations are untested. */
+static_assert(SINGLE_DMA_SIZE == PAGE_SIZE,
+	      "v2 PRP chunking assumes SINGLE_DMA_SIZE == PAGE_SIZE");
+
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
@@ -293,7 +298,7 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 			return NULL;
 		}
 	} else {
-		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true);
+		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true, desc_cnt - 1);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
 			return NULL;

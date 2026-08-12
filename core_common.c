@@ -51,14 +51,23 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 	return -EINVAL;
 }
 
-/* First PRP chunk length at (sg, intra_off): distance to the next dma_size boundary of the
- * mapped DMA address.  Computed from sg_dma_address(), not the CPU page offset — the device
- * splits by the address it receives, and SWIOTLB may not preserve the low address bits. */
-size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
+/* Chunk length from dma_addr to the next dma_size boundary; dma_size must be a power of 2
+ * (mask instead of modulo: a 64-bit div would not link on 32-bit kernels). */
+static size_t prp_chunk_len_at(dma_addr_t dma_addr, size_t dma_size)
 {
-	size_t rem = (sg_dma_address(sg) + intra_off) % dma_size;
+	size_t rem = (size_t)(dma_addr & (dma_size - 1));
 
 	return rem ? (dma_size - rem) : dma_size;
+}
+
+/* First PRP chunk length at (sg, intra_off): distance to the next dma_size boundary of the
+ * mapped DMA address (the device splits by the address it receives; SWIOTLB may not preserve
+ * the CPU page offset), clamped to the entry's remaining bytes. */
+size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
+{
+	size_t len = prp_chunk_len_at(sg_dma_address(sg) + intra_off, dma_size);
+
+	return min_t(size_t, len, sg_dma_len(sg) - intra_off);
 }
 
 /* Count PRP descriptors needed for byte_size bytes starting at (sg, intra_off); caller must
@@ -97,9 +106,11 @@ size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
 	return total;
 }
 
+/* known_desc_cnt: caller-precomputed emit count (after skip_first adjustment); 0 = compute here. */
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			   struct mx_transfer *transfer, size_t dma_size,
-			   int descs_per_list, bool skip_first_entry)
+			   int descs_per_list, bool skip_first_entry,
+			   size_t known_desc_cnt)
 {
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	size_t byte_offset = transfer->sg_byte_offset;
@@ -120,7 +131,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 		return 0;
 	}
 
-	total_desc_cnt = mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
+	total_desc_cnt = known_desc_cnt ? known_desc_cnt :
+			 mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
 	if (total_desc_cnt == 0) {
 		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
 		return 0;
@@ -156,7 +168,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		len = min3((size_t)dma_size, entry_avail, remaining);
+		/* Re-align: a new SG entry's DMA address may not sit on a dma_size boundary. */
+		len = min3(prp_chunk_len_at(dma_addr, dma_size), entry_avail, remaining);
 	}
 
 	while (remaining > 0) {
@@ -185,7 +198,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		len = min3((size_t)dma_size, entry_avail, remaining);
+		/* Re-align: a new SG entry's DMA address may not sit on a dma_size boundary. */
+		len = min3(prp_chunk_len_at(dma_addr, dma_size), entry_avail, remaining);
 	}
 
 	return transfer->desc_list_ba[0];
