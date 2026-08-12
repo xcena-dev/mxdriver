@@ -226,11 +226,6 @@ static const struct mx_queue_ops v2_queue_ops = {
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-/* create_mx_command_sg branches on host page count (split_pages_nr) but emits PRP entries of dma_size
- * (= SINGLE_DMA_SIZE).  Branching is correct only while these match. */
-static_assert(SINGLE_DMA_SIZE == PAGE_SIZE,
-	      "v2 PRP branching in create_mx_command_sg assumes SINGLE_DMA_SIZE == PAGE_SIZE");
-
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
@@ -251,9 +246,7 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	struct scatterlist *sg = NULL;
 	size_t intra_off = 0;
-	unsigned int slice_offset_in_page =
-		offset_in_page((uintptr_t)transfer->sg_ctx->user_addr + transfer->sg_byte_offset);
-	int split_pages_nr = DIV_ROUND_UP(slice_offset_in_page + transfer->size, PAGE_SIZE);
+	size_t desc_cnt;
 	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
@@ -274,19 +267,22 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		return NULL;
 	}
 
-	if (split_pages_nr == 1) {
+	/* Branch on the DMA-side entry count, not host page count (alignments can differ). */
+	desc_cnt = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, false);
+
+	if (desc_cnt == 1) {
 		comm->prp_entry2 = 0;
-	} else if (split_pages_nr == 2) {
+	} else if (desc_cnt == 2) {
 		size_t first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
 
-		/* Second PRP entry points to the page after the first chunk. */
+		/* Second PRP entry points to the chunk after the first. */
 		if (intra_off + first_len < sg_dma_len(sg)) {
 			comm->prp_entry2 = comm->prp_entry1 + first_len;
 		} else {
 			struct scatterlist *next = sg_next(sg);
 
 			if (!next) {
-				pr_warn("sg_next NULL in 2-page path (id=%u)\n", transfer->id);
+				pr_warn("sg_next NULL in 2-entry path (id=%u)\n", transfer->id);
 				return NULL;
 			}
 			comm->prp_entry2 = sg_dma_address(next);
