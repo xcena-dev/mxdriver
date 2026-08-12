@@ -51,13 +51,12 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 	return -EINVAL;
 }
 
-/* First PRP chunk length within an SG entry starting at intra_off; truncates so subsequent chunks
- * land on dma_size boundaries.  Returns dma_size when already aligned.  Works for arbitrary
- * dma_size (compiler folds the modulo to a bitmask when dma_size is a known power of 2). */
+/* First PRP chunk length at (sg, intra_off): distance to the next dma_size boundary of the
+ * mapped DMA address.  Computed from sg_dma_address(), not the CPU page offset — the device
+ * splits by the address it receives, and SWIOTLB may not preserve the low address bits. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
 {
-	size_t off_in_page = (sg->offset + intra_off) & (PAGE_SIZE - 1);
-	size_t rem = off_in_page % dma_size;
+	size_t rem = (sg_dma_address(sg) + intra_off) % dma_size;
 
 	return rem ? (dma_size - rem) : dma_size;
 }

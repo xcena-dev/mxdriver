@@ -423,8 +423,8 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *trans
 int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 		 struct scatterlist **out_sg, size_t *out_intra);
 
-/* First PRP chunk length when starting intra_off bytes into an SG entry; truncates so subsequent
- * chunks land on dma_size boundaries.  Returns dma_size when already aligned.  See core_common.c. */
+/* First PRP chunk length at (sg, intra_off); splits fall on dma_size boundaries of the mapped
+ * DMA address.  See core_common.c. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
 
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
