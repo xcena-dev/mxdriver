@@ -413,8 +413,10 @@ void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
 int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
-size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
-			       size_t dma_size, bool skip_first);
+/* Counts PRP descriptors into *out_cnt and rejects (-EINVAL) slices a PRP list cannot express,
+ * i.e. an SG entry ending off a dma_size boundary with data still to come.  See core_common.c. */
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			    size_t dma_size, bool skip_first, size_t *out_cnt);
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 			   size_t dma_size, int descs_per_list, bool skip_first_entry,
 			   size_t known_desc_cnt);

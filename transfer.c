@@ -86,6 +86,24 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 }
 
 /*
+ * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
+ * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
+ * sg_alloc_table_from_pages() alone would coalesce past both.  Page-aligned so the split lands
+ * on a PRP chunk boundary; PAGE_SIZE floor because the helper rejects a sub-page limit.
+ */
+static unsigned int mx_max_sg_segment(struct device *dev)
+{
+	size_t limit = dma_get_max_seg_size(dev);
+	size_t map_max = dma_max_mapping_size(dev);
+
+	if (map_max)
+		limit = min(limit, map_max);
+	limit = ALIGN_DOWN(min_t(size_t, limit, UINT_MAX), PAGE_SIZE);
+
+	return limit ? (unsigned int)limit : PAGE_SIZE;
+}
+
+/*
  * Create a shared SG mapping for a user buffer; splits attach via mx_sg_context_get/put.
  * Caller owns the initial refcount.  Returns ERR_PTR on failure so callers can distinguish
  * -EFAULT (bad addr) / -EIO (dma_map) / -ENOMEM (alloc); partial state is freed via put.
@@ -163,7 +181,8 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
 	} else {
-		ret = sg_alloc_table_from_pages(sgt, ctx->pages, pages_nr, offset, total_size, GFP_KERNEL);
+		ret = sg_alloc_table_from_pages_segment(sgt, ctx->pages, pages_nr, offset, total_size,
+							mx_max_sg_segment(&mx_pdev->pdev->dev), GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
 			goto err;
@@ -577,7 +596,7 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 
 	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
 	if (ret < 0) {
-		release_mx_transfer(transfer);
+		mx_transfer_destroy_sg(mx_pdev, transfer);
 		return ret;
 	}
 

@@ -162,9 +162,13 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	 * mx_sg_locate).  Cap so dma_map_sg never produces a 32-bit-overflowing entry. */
 	dma_set_max_seg_size(&pdev->dev, SZ_1G);
 
-	/* Have SWIOTLB bounce buffers preserve intra-page offsets (as NVMe does), so
-	 * mid-SG DMA addresses stay chunk-aligned like the pinned user pages. */
-	dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1);
+	/* PRP carries no lengths, so the device splits chunks by DMA address; SG entries must end
+	 * on chunk boundaries like the pinned user pages do.  Bounce buffers only keep that true
+	 * if they preserve intra-page offsets, so require it as NVMe does. */
+	if (dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1)) {
+		pr_err("Failed to set DMA min align mask\n");
+		return -EINVAL;
+	}
 
 	return 0;
 }

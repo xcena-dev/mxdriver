@@ -272,10 +272,11 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		return NULL;
 	}
 
-	/* Branch on the DMA-side entry count, not host page count (alignments can differ). */
-	desc_cnt = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, false);
-	if (desc_cnt == 0) {
-		pr_warn("desc count is 0 (id=%u)\n", transfer->id);
+	/* Branch on the DMA-side entry count, not host page count (alignments can differ).
+	 * This also validates that the slice is expressible as a PRP list. */
+	ret = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, false, &desc_cnt);
+	if (ret || desc_cnt == 0) {
+		pr_warn("Failed to count descs (err=%d, cnt=%zu, id=%u)\n", ret, desc_cnt, transfer->id);
 		return NULL;
 	}
 

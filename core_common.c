@@ -70,17 +70,25 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
 	return min_t(size_t, len, sg_dma_len(sg) - intra_off);
 }
 
-/* Count PRP descriptors needed for byte_size bytes starting at (sg, intra_off); caller must
- * pre-locate via mx_sg_locate.  skip_first subtracts one (when caller stashes the first DMA
- * address inline in prp_entry1).  sg/intra_off are by-value so caller's walking state survives. */
-size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
-			       size_t byte_size, size_t dma_size, bool skip_first)
+/* Count PRP descriptors for byte_size bytes at (sg, intra_off) and verify the slice is
+ * expressible as a PRP list; caller must pre-locate via mx_sg_locate.  skip_first subtracts one
+ * (when the caller stashes the first DMA address inline in prp_entry1).  sg/intra_off are
+ * by-value so the caller's walking state survives.
+ *
+ * The device receives no per-descriptor lengths: it takes the first chunk as the distance to the
+ * next dma_size boundary and every later one as a full dma_size.  A PRP list can therefore only
+ * describe a slice whose SG entries end on a dma_size boundary (the last one aside), so an entry
+ * ending short would make the device run past it.  dma_set_min_align_mask() keeps mappings
+ * compliant; a violation here means data would be misplaced, so reject it (-EINVAL) instead. */
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			    size_t dma_size, bool skip_first, size_t *out_cnt)
 {
 	size_t remaining = byte_size;
 	size_t total = 0;
 
+	*out_cnt = 0;
 	if (byte_size == 0)
-		return 0;
+		return -EINVAL;
 
 	while (remaining > 0 && sg) {
 		size_t avail = sg_dma_len(sg) - intra_off;
@@ -96,14 +104,26 @@ size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
 		if (remaining == 0)
 			break;
 
+		if ((sg_dma_address(sg) + intra_off + consumed) & (dma_size - 1)) {
+			pr_warn("sg entry ends off a %zu-byte chunk boundary (dma=%pad len=%zu)\n",
+				dma_size, &sg->dma_address, consumed);
+			return -EINVAL;
+		}
+
 		sg = sg_next(sg);
 		intra_off = 0;
+	}
+
+	if (remaining) {
+		pr_warn("sg mapping short by %zu bytes\n", remaining);
+		return -EINVAL;
 	}
 
 	if (skip_first && total > 0)
 		total--;
 
-	return total;
+	*out_cnt = total;
+	return 0;
 }
 
 /* known_desc_cnt: caller-precomputed emit count (after skip_first adjustment); 0 = compute here. */
@@ -131,8 +151,16 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 		return 0;
 	}
 
-	total_desc_cnt = known_desc_cnt ? known_desc_cnt :
-			 mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
+	if (known_desc_cnt) {
+		total_desc_cnt = known_desc_cnt;
+	} else {
+		ret = mx_get_total_desc_count(sg, intra_off, remaining, dma_size,
+					      skip_first_entry, &total_desc_cnt);
+		if (ret) {
+			pr_warn("Failed to count descs (err=%d, byte_size=%zu)\n", ret, remaining);
+			return 0;
+		}
+	}
 	if (total_desc_cnt == 0) {
 		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
 		return 0;
@@ -174,10 +202,17 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 
 	while (remaining > 0) {
 		if (desc_idx == descs_per_list - 1 && total_desc_cnt > 1) {
+			if (list_idx + 1 >= list_cnt)
+				goto overrun;
 			desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
 			desc = (uint64_t *)transfer->desc_list_va[list_idx];
 			desc_idx = 0;
 		}
+
+		/* total_desc_cnt is the allocation basis; emitting past it would leave the loop
+		 * writing off the end of the current dma_pool page. */
+		if (desc_idx >= descs_per_list || total_desc_cnt == 0)
+			goto overrun;
 
 		desc[desc_idx++] = dma_addr;
 		dma_addr += len;
@@ -203,6 +238,12 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	}
 
 	return transfer->desc_list_ba[0];
+
+overrun:
+	pr_warn("desc count disagrees with emit walk (remaining=%zu, list=%d/%d, idx=%d)\n",
+		remaining, list_idx, list_cnt, desc_idx);
+	desc_list_free(mx_pdev, transfer);
+	return 0;
 }
 
 /******************************************************************************/
