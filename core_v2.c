@@ -226,10 +226,10 @@ static const struct mx_queue_ops v2_queue_ops = {
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-/* Host-page slicing (transfer.c, mx_parallel_count_for) and PRP chunking must agree; other
- * combinations are untested. */
-static_assert(SINGLE_DMA_SIZE == PAGE_SIZE,
-	      "v2 PRP chunking assumes SINGLE_DMA_SIZE == PAGE_SIZE");
+/* transfer.c slices parallel transfers on host-page boundaries; they must land on chunk
+ * boundaries. */
+static_assert((PAGE_SIZE % SINGLE_DMA_SIZE) == 0,
+	      "v2 PRP chunking requires SINGLE_DMA_SIZE to divide PAGE_SIZE");
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {

@@ -76,10 +76,11 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
  * by-value so the caller's walking state survives.
  *
  * The device receives no per-descriptor lengths: it takes the first chunk as the distance to the
- * next dma_size boundary and every later one as a full dma_size.  A PRP list can therefore only
- * describe a slice whose SG entries end on a dma_size boundary (the last one aside), so an entry
- * ending short would make the device run past it.  dma_set_min_align_mask() keeps mappings
- * compliant; a violation here means data would be misplaced, so reject it (-EINVAL) instead. */
+ * next dma_size boundary and every later one as a full dma_size.  Only the first descriptor may
+ * therefore start mid-chunk and only the last may be short, which holds exactly when every entry
+ * but the last ends on a dma_size boundary and every entry but the first starts on one.
+ * dma_set_min_align_mask() keeps mappings compliant; a violation means the device would misplace
+ * data, so reject it (-EINVAL) instead. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
 			    size_t dma_size, bool skip_first, size_t *out_cnt)
 {
@@ -112,6 +113,14 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 
 		sg = sg_next(sg);
 		intra_off = 0;
+
+		/* Checked separately from the end above: only a trailing entry may be short, so
+		 * its start alignment is not implied by any entry's end. */
+		if (sg && (sg_dma_address(sg) & (dma_size - 1))) {
+			pr_warn("sg entry starts off a %zu-byte chunk boundary (dma=%pad)\n",
+				dma_size, &sg->dma_address);
+			return -EINVAL;
+		}
 	}
 
 	if (remaining) {
@@ -196,8 +205,9 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		/* Re-align: a new SG entry's DMA address may not sit on a dma_size boundary. */
-		len = min3(prp_chunk_len_at(dma_addr, dma_size), entry_avail, remaining);
+		if (dma_addr & (dma_size - 1))
+			goto misaligned;
+		len = min3(dma_size, entry_avail, remaining);
 	}
 
 	while (remaining > 0) {
@@ -233,11 +243,22 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		/* Re-align: a new SG entry's DMA address may not sit on a dma_size boundary. */
-		len = min3(prp_chunk_len_at(dma_addr, dma_size), entry_avail, remaining);
+		/* Past the first chunk the device consumes a full dma_size per descriptor, so emit
+		 * that and rely on mx_get_total_desc_count() having rejected any layout where it
+		 * would not fit.  Re-checked rather than re-derived: a short chunk here would be
+		 * read long by the device. */
+		if (dma_addr & (dma_size - 1))
+			goto misaligned;
+		len = min3(dma_size, entry_avail, remaining);
 	}
 
 	return transfer->desc_list_ba[0];
+
+misaligned:
+	pr_warn("desc walk left a %zu-byte chunk boundary (dma=%pad, remaining=%zu)\n",
+		dma_size, &dma_addr, remaining);
+	desc_list_free(mx_pdev, transfer);
+	return 0;
 
 overrun:
 	pr_warn("desc count disagrees with emit walk (remaining=%zu, list=%d/%d, idx=%d)\n",
