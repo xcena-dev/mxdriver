@@ -86,10 +86,18 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 }
 
 /* The segment-capped variant landed in 5.19; on older trees fall back to the uncapped helper,
- * which is what this driver used before and leaves segment length unbounded as it was. */
+ * which is what this driver used before and leaves segment length unbounded as it was.  Written
+ * as a wrapper rather than a macro so max_seg stays evaluated on both sides. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)
-#define sg_alloc_table_from_pages_segment(sgt, pages, n, off, sz, max_seg, gfp) \
-	sg_alloc_table_from_pages(sgt, pages, n, off, sz, gfp)
+static inline int mx_sg_alloc_table(struct sg_table *sgt, struct page **pages, unsigned int n,
+				    unsigned int off, unsigned long sz, unsigned int max_seg,
+				    gfp_t gfp)
+{
+	(void)max_seg;
+	return sg_alloc_table_from_pages(sgt, pages, n, off, sz, gfp);
+}
+#else
+#define mx_sg_alloc_table sg_alloc_table_from_pages_segment
 #endif
 
 /*
@@ -188,8 +196,8 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
 	} else {
-		ret = sg_alloc_table_from_pages_segment(sgt, ctx->pages, pages_nr, offset, total_size,
-							mx_max_sg_segment(&mx_pdev->pdev->dev), GFP_KERNEL);
+		ret = mx_sg_alloc_table(sgt, ctx->pages, pages_nr, offset, total_size,
+					mx_max_sg_segment(&mx_pdev->pdev->dev), GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
 			goto err;
