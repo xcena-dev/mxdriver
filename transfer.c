@@ -85,6 +85,13 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 	return ctx;
 }
 
+/* The segment-capped variant landed in 5.19; on older trees fall back to the uncapped helper,
+ * which is what this driver used before and leaves segment length unbounded as it was. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)
+#define sg_alloc_table_from_pages_segment(sgt, pages, n, off, sz, max_seg, gfp) \
+	sg_alloc_table_from_pages(sgt, pages, n, off, sz, gfp)
+#endif
+
 /*
  * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
  * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
