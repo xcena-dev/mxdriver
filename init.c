@@ -165,10 +165,9 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	/* PRP carries no lengths, so the device splits chunks by DMA address; SG entries must end
 	 * on chunk boundaries like the pinned user pages do.  Bounce buffers only keep that true
 	 * if they preserve intra-page offsets, so require it as NVMe does. */
-	if (dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1)) {
-		pr_err("Failed to set DMA min align mask\n");
-		return -EINVAL;
-	}
+	/* Return value discarded on purpose: it only reports a NULL dev->dma_parms, which
+	 * pci_device_add() always fills in, and the helper returns void from 6.12 on. */
+	dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1);
 
 	return 0;
 }
