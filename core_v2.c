@@ -257,27 +257,27 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
 		pr_warn("Failed to allocate mx_command for sg transfer\n");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	ret = mx_sg_locate(sgt, transfer->sg_byte_offset, &sg, &intra_off);
 	if (ret) {
 		pr_warn("Failed to locate sg slice (id=%u)\n", transfer->id);
-		return NULL;
+		return ERR_PTR(ret);
 	}
 
 	comm->prp_entry1 = sg_dma_address(sg) + intra_off;
 	if (!comm->prp_entry1) {
 		pr_warn("Failed to get sg_dma_address\n");
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	/* Branch on the DMA-side entry count, not host page count (alignments can differ).
 	 * This also validates that the slice is expressible as a PRP list. */
-	ret = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, false, &desc_cnt);
+	ret = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, &desc_cnt);
 	if (ret || desc_cnt == 0) {
 		pr_warn("Failed to count descs (err=%d, cnt=%zu, id=%u)\n", ret, desc_cnt, transfer->id);
-		return NULL;
+		return ERR_PTR(ret ? ret : -EINVAL);
 	}
 
 	if (desc_cnt == 1) {
@@ -293,20 +293,20 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 
 			if (!next) {
 				pr_warn("sg_next NULL in 2-entry path (id=%u)\n", transfer->id);
-				return NULL;
+				return ERR_PTR(-EINVAL);
 			}
 			comm->prp_entry2 = sg_dma_address(next);
 		}
 
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
-			return NULL;
+			return ERR_PTR(-EINVAL);
 		}
 	} else {
 		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true, desc_cnt - 1);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
-			return NULL;
+			return ERR_PTR(-ENOMEM);
 		}
 	}
 

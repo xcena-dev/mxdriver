@@ -193,7 +193,6 @@ static const struct mx_queue_ops v1_queue_ops = {
 static_assert((PAGE_SIZE % SINGLE_DMA_SIZE) == 0,
 	      "v1 PRP chunking requires SINGLE_DMA_SIZE to divide PAGE_SIZE");
 
-
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm = (struct mx_command *)transfer->cmd_inline;
@@ -215,37 +214,46 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	struct scatterlist *sg = NULL;
 	size_t intra_off = 0;
-	size_t first_len;
+	size_t first_len, desc_cnt;
 	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
 		pr_warn("Failed to allocate mx_command for sg transfer\n");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	ret = mx_sg_locate(sgt, transfer->sg_byte_offset, &sg, &intra_off);
 	if (ret) {
 		pr_warn("Failed to locate sg slice (id=%u)\n", transfer->id);
-		return NULL;
+		return ERR_PTR(ret);
 	}
 
 	first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
 
+	/* Single mode carries an explicit length, so it needs no chunk boundary to land on. */
 	if (transfer->size <= first_len) {
 		comm->page_mode = MXDMA_PAGE_MODE_SINGLE;
 		comm->host_addr = sg_dma_address(sg) + intra_off;
 		if (!comm->host_addr) {
 			pr_warn("Failed to get sg_dma_address\n");
-			return NULL;
+			return ERR_PTR(-EINVAL);
 		}
-	} else {
-		comm->page_mode = MXDMA_PAGE_MODE_MULTI;
-		comm->prp_entry1 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, false, 0);
-		if (!comm->prp_entry1) {
-			pr_warn("Failed to get desc_list_init\n");
-			return NULL;
-		}
+		return (void *)comm;
+	}
+
+	ret = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, &desc_cnt);
+	if (ret) {
+		pr_warn("Failed to count descs (err=%d, id=%u)\n", ret, transfer->id);
+		return ERR_PTR(ret);
+	}
+
+	comm->page_mode = MXDMA_PAGE_MODE_MULTI;
+	comm->prp_entry1 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE,
+					     NUM_OF_DESC_PER_LIST, false, desc_cnt);
+	if (!comm->prp_entry1) {
+		pr_warn("Failed to get desc_list_init\n");
+		return ERR_PTR(-ENOMEM);
 	}
 
 	return (void*)comm;

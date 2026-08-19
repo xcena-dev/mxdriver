@@ -310,6 +310,8 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
+	/* Returns the command, or ERR_PTR(-errno) — notably -EINVAL for a layout no PRP list can
+	 * express, which the caller must not mistake for memory pressure. */
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
@@ -413,13 +415,14 @@ void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
 int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
-/* Counts PRP descriptors into *out_cnt and rejects (-EINVAL) slices a PRP list cannot express,
- * i.e. an SG entry ending off a dma_size boundary with data still to come.  See core_common.c. */
+/* Counts PRP descriptors into *out_cnt.  Returns -EINVAL for a zero-length slice, a mapping
+ * shorter than byte_size, or a layout no PRP list can express: an SG entry ending off a dma_size
+ * boundary with data still to come, or a later entry starting off one.  See core_common.c. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
-			    size_t dma_size, bool skip_first, size_t *out_cnt);
+			    size_t dma_size, size_t *out_cnt);
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 			   size_t dma_size, int descs_per_list, bool skip_first_entry,
-			   size_t known_desc_cnt);
+			   size_t desc_cnt);
 
 /* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the byte offset into
  * that entry.  Returns 0 on hit, -EINVAL if byte_offset is past the mapping.  See core_common.c. */

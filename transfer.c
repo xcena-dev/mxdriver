@@ -85,21 +85,6 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 	return ctx;
 }
 
-/* The segment-capped variant landed in 5.19; on older trees fall back to the uncapped helper,
- * which is what this driver used before and leaves segment length unbounded as it was.  Written
- * as a wrapper rather than a macro so max_seg stays evaluated on both sides. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)
-static inline int mx_sg_alloc_table(struct sg_table *sgt, struct page **pages, unsigned int n,
-				    unsigned int off, unsigned long sz, unsigned int max_seg,
-				    gfp_t gfp)
-{
-	(void)max_seg;
-	return sg_alloc_table_from_pages(sgt, pages, n, off, sz, gfp);
-}
-#else
-#define mx_sg_alloc_table sg_alloc_table_from_pages_segment
-#endif
-
 /*
  * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
  * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
@@ -196,8 +181,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
 	} else {
-		ret = mx_sg_alloc_table(sgt, ctx->pages, pages_nr, offset, total_size,
-					mx_max_sg_segment(&mx_pdev->pdev->dev), GFP_KERNEL);
+		ret = sg_alloc_table_from_pages_segment(sgt, ctx->pages, pages_nr, offset, total_size,
+						       mx_max_sg_segment(&mx_pdev->pdev->dev),
+						       GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
 			goto err;
@@ -585,9 +571,13 @@ static void mx_transfer_wait_work(struct work_struct *work)
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
-	if (!transfer->command) {
-		pr_warn("Failed to create_command_sg (id=%u)\n", transfer->id);
-		return -ENOMEM;
+	/* IS_ERR() lets a bare NULL through as success, so reject it explicitly. */
+	if (IS_ERR_OR_NULL(transfer->command)) {
+		int ret = transfer->command ? PTR_ERR(transfer->command) : -ENOMEM;
+
+		transfer->command = NULL;
+		pr_warn("Failed to create_command_sg (id=%u, err=%d)\n", transfer->id, ret);
+		return ret;
 	}
 
 	transfer->mx_pdev = mx_pdev;
@@ -645,11 +635,10 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 	}
 
 	if (ret < 0) {
-		for (i = 0; i < initialized_count; i++)
+		/* <= initialized_count: the failing index may already hold a desc list.  Past it
+		 * nothing was attempted, so the empty-list teardown is a no-op. */
+		for (i = 0; i < count; i++)
 			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
-
-		for (i = initialized_count; i < count; i++)
-			release_mx_transfer(transfers[i]);
 
 		kfree(transfers);
 		return ret;

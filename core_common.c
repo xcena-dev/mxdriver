@@ -71,9 +71,8 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
 }
 
 /* Count PRP descriptors for byte_size bytes at (sg, intra_off) and verify the slice is
- * expressible as a PRP list; caller must pre-locate via mx_sg_locate.  skip_first subtracts one
- * (when the caller stashes the first DMA address inline in prp_entry1).  sg/intra_off are
- * by-value so the caller's walking state survives.
+ * expressible as a PRP list; caller must pre-locate via mx_sg_locate.  sg/intra_off are by-value
+ * so the caller's walking state survives.
  *
  * The device receives no per-descriptor lengths: it takes the first chunk as the distance to the
  * next dma_size boundary and every later one as a full dma_size.  Only the first descriptor may
@@ -82,10 +81,11 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
  * dma_set_min_align_mask() keeps mappings compliant; a violation means the device would misplace
  * data, so reject it (-EINVAL) instead. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
-			    size_t dma_size, bool skip_first, size_t *out_cnt)
+			    size_t dma_size, size_t *out_cnt)
 {
 	size_t remaining = byte_size;
 	size_t total = 0;
+	dma_addr_t end;
 
 	*out_cnt = 0;
 	if (byte_size == 0)
@@ -105,9 +105,10 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 		if (remaining == 0)
 			break;
 
-		if ((sg_dma_address(sg) + intra_off + consumed) & (dma_size - 1)) {
-			pr_warn("sg entry ends off a %zu-byte chunk boundary (dma=%pad len=%zu)\n",
-				dma_size, &sg->dma_address, consumed);
+		end = sg_dma_address(sg) + intra_off + consumed;
+		if (end & (dma_size - 1)) {
+			pr_warn_ratelimited("sg entry ends off a %zu-byte chunk boundary (end=%pad)\n",
+					    dma_size, &end);
 			return -EINVAL;
 		}
 
@@ -117,29 +118,28 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 		/* Checked separately from the end above: only a trailing entry may be short, so
 		 * its start alignment is not implied by any entry's end. */
 		if (sg && (sg_dma_address(sg) & (dma_size - 1))) {
-			pr_warn("sg entry starts off a %zu-byte chunk boundary (dma=%pad)\n",
-				dma_size, &sg->dma_address);
+			pr_warn_ratelimited("sg entry starts off a %zu-byte chunk boundary (dma=%pad)\n",
+					    dma_size, &sg->dma_address);
 			return -EINVAL;
 		}
 	}
 
 	if (remaining) {
-		pr_warn("sg mapping short by %zu bytes\n", remaining);
+		pr_warn_ratelimited("sg mapping short by %zu bytes\n", remaining);
 		return -EINVAL;
 	}
-
-	if (skip_first && total > 0)
-		total--;
 
 	*out_cnt = total;
 	return 0;
 }
 
-/* known_desc_cnt: caller-precomputed emit count (after skip_first adjustment); 0 = compute here. */
+/* desc_cnt: descriptors this call will emit, i.e. mx_get_total_desc_count() less the one the
+ * caller stashes inline when skip_first_entry.  Required: the caller has already walked the
+ * slice, and recomputing here would only add a way for the two walks to disagree. */
 uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			   struct mx_transfer *transfer, size_t dma_size,
 			   int descs_per_list, bool skip_first_entry,
-			   size_t known_desc_cnt)
+			   size_t desc_cnt)
 {
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	size_t byte_offset = transfer->sg_byte_offset;
@@ -160,16 +160,7 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 		return 0;
 	}
 
-	if (known_desc_cnt) {
-		total_desc_cnt = known_desc_cnt;
-	} else {
-		ret = mx_get_total_desc_count(sg, intra_off, remaining, dma_size,
-					      skip_first_entry, &total_desc_cnt);
-		if (ret) {
-			pr_warn("Failed to count descs (err=%d, byte_size=%zu)\n", ret, remaining);
-			return 0;
-		}
-	}
+	total_desc_cnt = desc_cnt;
 	if (total_desc_cnt == 0) {
 		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
 		return 0;
