@@ -28,11 +28,22 @@ SRC_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 KVER="${XCENA_TARGET_KVER:-}"
 KDIR="${XCENA_TARGET_KDIR:-}"
 if [[ -n "$KDIR" ]]; then
-    TREE_KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
+    [[ -d "$KDIR" ]] || { echo "[ERROR] kernel build tree not found: ${KDIR}"; exit 1; }
+    # Absolute from here on: dkms cds into its own build tree before running
+    # make -C "$kernel_source_dir", where a relative path resolves elsewhere.
+    KDIR="$(cd "$KDIR" && pwd)"
+    # A header tree's kernelrelease target recomputes the version from the
+    # Makefile and loses the distro suffix (6.8.0-117-generic reads back as
+    # 6.8.12); include/config/kernel.release holds what the tree really builds.
+    TREE_KVER="$(cat "$KDIR/include/config/kernel.release" 2>/dev/null || true)"
+    [[ -n "$TREE_KVER" ]] || TREE_KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
     if [[ -z "$KVER" ]]; then
         KVER="$TREE_KVER"
-        [[ -n "$KVER" ]] || { echo "[ERROR] cannot read kernelrelease from '${KDIR}'"; exit 1; }
-    elif [[ -n "$TREE_KVER" && "$TREE_KVER" != "$KVER" ]]; then
+        [[ -n "$KVER" ]] || { echo "[ERROR] cannot read the kernel release from '${KDIR}'"; exit 1; }
+    elif [[ -z "$TREE_KVER" ]]; then
+        echo "[WARN] cannot read the kernel release from '${KDIR}';"
+        echo "       XCENA_TARGET_KVER='${KVER}' goes unchecked against that tree."
+    elif [[ "$TREE_KVER" != "$KVER" ]]; then
         echo "[ERROR] XCENA_TARGET_KVER='${KVER}' disagrees with the tree at '${KDIR}'"
         echo "        (that tree builds '${TREE_KVER}'). Give one of them, or matching values."
         exit 1
@@ -40,7 +51,7 @@ if [[ -n "$KDIR" ]]; then
 fi
 [[ -n "$KVER" ]] || KVER="$(uname -r)"
 [[ -n "$KDIR" ]] || KDIR="/lib/modules/${KVER}/build"
-if [[ ! -e "$KDIR" ]]; then
+if [[ ! -d "$KDIR" ]]; then
     echo "[ERROR] kernel build tree not found: ${KDIR}"
     echo "        install linux-headers-${KVER}, or set XCENA_TARGET_KDIR to the tree."
     exit 1
