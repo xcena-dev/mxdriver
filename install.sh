@@ -124,6 +124,9 @@ install_dkms() {
     make BUILDSYSTEM_DIR="$KDIR" clean 2>/dev/null || true
     cp -a Makefile dkms.conf *.c *.h "${SRC_DIR}/"
     cp -a scripts/dkms-post-install.sh "${SRC_DIR}/scripts/"
+    # The clean is best-effort, so drop the one generated file the *.c glob can
+    # still carry over instead of leaving DKMS to compile a stale copy.
+    rm -f "${SRC_DIR}"/*.mod.c
 
     # DKMS resolves the tree as /lib/modules/<kver>/build on its own, so only a
     # tree outside that path has to be spelled out.
