@@ -25,6 +25,9 @@ SRC_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 # tree and registered under the version, so a mismatch installs a module that
 # cannot load (DKMS), or installs it into a directory depmod never indexes
 # (legacy path) -- both silently.
+#
+# sudo's env_reset drops all three variables, so hand them to sudo rather than to
+# the shell that calls it: `sudo XCENA_TARGET_KVER=... ./install.sh`.
 KVER="${XCENA_TARGET_KVER:-}"
 KDIR="${XCENA_TARGET_KDIR:-}"
 if [[ -n "$KDIR" ]]; then
