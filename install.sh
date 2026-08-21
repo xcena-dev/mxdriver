@@ -214,10 +214,14 @@ fi
 
 # Regenerate initramfs once at the end so it picks up softdep ordering and,
 # where configured, the bundled mx_dma module.
+#
+# Non-fatal, as in scripts/dkms-post-install.sh: -u needs an initrd to already
+# exist for that kernel, which a target kernel being staged into an image has
+# not got, and the module is installed either way.
 if [[ "$INITRAMFS_BACKEND" == "initramfs-tools" ]]; then
     echo "[INFO] Updating initramfs..."
-    update-initramfs -u -k "${KVER}"
+    update-initramfs -u -k "${KVER}" || echo "[WARN] initramfs update failed (non-fatal)"
 elif [[ "$INITRAMFS_BACKEND" == "dracut" ]]; then
     echo "[INFO] Updating initramfs via dracut..."
-    dracut --force --kver "${KVER}"
+    dracut --force --kver "${KVER}" || echo "[WARN] initramfs update failed (non-fatal)"
 fi

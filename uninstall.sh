@@ -40,7 +40,10 @@ if [[ -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     echo "[INFO] Removing xcena_set_devdax_perm..."
     rm -f /usr/local/sbin/xcena_set_devdax_perm
     rm -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
-    udevadm control --reload-rules
+    # Best-effort: udevd is not running during an image build, and what a booted
+    # system reads is the rule file, which is already gone by this point.
+    udevadm control --reload-rules 2>/dev/null \
+        || echo "[INFO] udevd not running; rule change applies at boot."
     echo "[INFO] xcena_set_devdax_perm removal completed."
 fi
 
