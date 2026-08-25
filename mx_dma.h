@@ -420,9 +420,11 @@ int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
  * boundary with data still to come, or a later entry starting off one.  See core_common.c. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
 			    size_t dma_size, size_t *out_cnt);
-uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
-			   size_t dma_size, int descs_per_list, bool skip_first_entry,
-			   size_t desc_cnt);
+/* Builds the descriptor chain and reports its bus address through *out_ba.  Returns -EINVAL for
+ * a layout the walk cannot express, or the allocator's error; *out_ba is 0 on any failure. */
+int mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
+		      size_t dma_size, int descs_per_list, bool skip_first_entry,
+		      size_t desc_cnt, uint64_t *out_ba);
 
 /* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the byte offset into
  * that entry.  Returns 0 on hit, -EINVAL if byte_offset is past the mapping.  See core_common.c. */

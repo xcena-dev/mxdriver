@@ -249,11 +249,11 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	}
 
 	comm->page_mode = MXDMA_PAGE_MODE_MULTI;
-	comm->prp_entry1 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE,
-					     NUM_OF_DESC_PER_LIST, false, desc_cnt);
-	if (!comm->prp_entry1) {
-		pr_warn("Failed to get desc_list_init\n");
-		return ERR_PTR(-ENOMEM);
+	ret = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST,
+				false, desc_cnt, &comm->prp_entry1);
+	if (ret) {
+		pr_warn("Failed to get desc_list_init (err=%d)\n", ret);
+		return ERR_PTR(ret);
 	}
 
 	return (void*)comm;

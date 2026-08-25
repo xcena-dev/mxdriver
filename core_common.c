@@ -136,10 +136,10 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 /* desc_cnt: descriptors this call will emit, i.e. mx_get_total_desc_count() less the one the
  * caller stashes inline when skip_first_entry.  Required: the caller has already walked the
  * slice, and recomputing here would only add a way for the two walks to disagree. */
-uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
-			   struct mx_transfer *transfer, size_t dma_size,
-			   int descs_per_list, bool skip_first_entry,
-			   size_t desc_cnt)
+int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
+		      struct mx_transfer *transfer, size_t dma_size,
+		      int descs_per_list, bool skip_first_entry,
+		      size_t desc_cnt, uint64_t *out_ba)
 {
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	size_t byte_offset = transfer->sg_byte_offset;
@@ -154,22 +154,24 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	int list_cnt, list_idx, desc_idx;
 	int ret;
 
+	*out_ba = 0;
+
 	ret = mx_sg_locate(sgt, byte_offset, &sg, &intra_off);
 	if (ret) {
 		pr_warn("Failed to locate sg slice (byte_offset=%zu)\n", byte_offset);
-		return 0;
+		return ret;
 	}
 
 	total_desc_cnt = desc_cnt;
 	if (total_desc_cnt == 0) {
 		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
-		return 0;
+		return -EINVAL;
 	}
 	list_cnt = mx_get_list_count(total_desc_cnt, descs_per_list);
 	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
-		return 0;
+		return ret;
 	}
 
 	list_idx = 0;
@@ -191,7 +193,7 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			if (!sg) {
 				pr_warn("sg_next NULL after skip_first\n");
 				desc_list_free(mx_pdev, transfer);
-				return 0;
+				return -EINVAL;
 			}
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
@@ -229,7 +231,7 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			if (!sg) {
 				pr_warn("sg_next NULL mid-walk (remaining=%zu)\n", remaining);
 				desc_list_free(mx_pdev, transfer);
-				return 0;
+				return -EINVAL;
 			}
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
@@ -243,19 +245,20 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 		len = min3(dma_size, entry_avail, remaining);
 	}
 
-	return transfer->desc_list_ba[0];
+	*out_ba = transfer->desc_list_ba[0];
+	return 0;
 
 misaligned:
 	pr_warn("desc walk left a %zu-byte chunk boundary (dma=%pad, remaining=%zu)\n",
 		dma_size, &dma_addr, remaining);
 	desc_list_free(mx_pdev, transfer);
-	return 0;
+	return -EINVAL;
 
 overrun:
 	pr_warn("desc count disagrees with emit walk (remaining=%zu, list=%d/%d, idx=%d)\n",
 		remaining, list_idx, list_cnt, desc_idx);
 	desc_list_free(mx_pdev, transfer);
-	return 0;
+	return -EINVAL;
 }
 
 /******************************************************************************/

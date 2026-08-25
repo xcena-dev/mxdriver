@@ -89,7 +89,8 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
  * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
  * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
  * sg_alloc_table_from_pages() alone would coalesce past both.  Page-aligned so the split lands
- * on a PRP chunk boundary; PAGE_SIZE floor because the helper rejects a sub-page limit.
+ * on a PRP chunk boundary.  A sub-page limit is not expressible here (the helper rejects one),
+ * so it is reported and ignored rather than silently substituted.
  */
 static unsigned int mx_max_sg_segment(struct device *dev)
 {
@@ -99,8 +100,13 @@ static unsigned int mx_max_sg_segment(struct device *dev)
 	if (map_max)
 		limit = min(limit, map_max);
 	limit = ALIGN_DOWN(min_t(size_t, limit, UINT_MAX), PAGE_SIZE);
+	if (!limit) {
+		pr_warn_once("DMA mapping limit %zu below PAGE_SIZE; capping segments at PAGE_SIZE\n",
+			     map_max);
+		return PAGE_SIZE;
+	}
 
-	return limit ? (unsigned int)limit : PAGE_SIZE;
+	return (unsigned int)limit;
 }
 
 /*
@@ -619,7 +625,6 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer **transfers, int opcode, int count, bool nowait)
 {
-	int initialized_count = 0;
 	ssize_t transferred = 0;
 	ssize_t err = 0;
 	size_t total_size = 0;
@@ -631,12 +636,12 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		if (ret < 0)
 			break;
 		total_size += transfers[i]->size;
-		initialized_count++;
 	}
 
 	if (ret < 0) {
-		/* <= initialized_count: the failing index may already hold a desc list.  Past it
-		 * nothing was attempted, so the empty-list teardown is a no-op. */
+		/* Every index gets the full teardown regardless of how far init got: the one
+		 * that failed may already hold a desc list, and the ones never attempted have
+		 * an empty list that desc_list_free() ignores. */
 		for (i = 0; i < count; i++)
 			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
 
