@@ -310,6 +310,8 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
+	/* Returns the command, or ERR_PTR(-errno) — notably -EINVAL for a layout no PRP list can
+	 * express, which the caller must not mistake for memory pressure. */
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
@@ -413,18 +415,25 @@ void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
 /* core_common.c */
 int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
-size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
-			       size_t dma_size, bool skip_first);
-uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
-			   size_t dma_size, int descs_per_list, bool skip_first_entry);
+/* Counts PRP descriptors into *out_cnt.  Returns -EINVAL for a zero-length slice, a mapping
+ * shorter than byte_size, or a layout no PRP list can express: an SG entry ending off a dma_size
+ * boundary with data still to come, or a later entry starting off one.  See core_common.c. */
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			    size_t dma_size, size_t *out_cnt);
+/* Builds the descriptor chain and reports its bus address through *out_ba.  Returns -EINVAL for
+ * a layout the walk cannot express, or the allocator's error; *out_ba is 0 on any failure. */
+int mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
+		      size_t dma_size, int descs_per_list, bool skip_first_entry,
+		      size_t desc_cnt, uint64_t *out_ba);
 
 /* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the byte offset into
  * that entry.  Returns 0 on hit, -EINVAL if byte_offset is past the mapping.  See core_common.c. */
 int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 		 struct scatterlist **out_sg, size_t *out_intra);
 
-/* First PRP chunk length when starting intra_off bytes into an SG entry; truncates so subsequent
- * chunks land on dma_size boundaries.  Returns dma_size when already aligned.  See core_common.c. */
+/* First PRP chunk length at (sg, intra_off); splits fall on dma_size boundaries of the mapped
+ * DMA address, clamped to the entry's remaining bytes.  dma_size must be a power of 2.
+ * See core_common.c. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
 
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);

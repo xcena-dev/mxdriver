@@ -162,6 +162,13 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	 * mx_sg_locate).  Cap so dma_map_sg never produces a 32-bit-overflowing entry. */
 	dma_set_max_seg_size(&pdev->dev, SZ_1G);
 
+	/* PRP carries no lengths, so the device splits chunks by DMA address; SG entries must end
+	 * on chunk boundaries like the pinned user pages do.  Bounce buffers only keep that true
+	 * if they preserve intra-page offsets, so require it as NVMe does. */
+	/* Return value discarded on purpose: it only reports a NULL dev->dma_parms, which
+	 * pci_device_add() always fills in, and the helper returns void from 6.12 on. */
+	dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1);
+
 	return 0;
 }
 

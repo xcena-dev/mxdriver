@@ -86,6 +86,30 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 }
 
 /*
+ * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
+ * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
+ * sg_alloc_table_from_pages() alone would coalesce past both.  Page-aligned so the split lands
+ * on a PRP chunk boundary.  A sub-page limit is not expressible here (the helper rejects one),
+ * so it is reported and ignored rather than silently substituted.
+ */
+static unsigned int mx_max_sg_segment(struct device *dev)
+{
+	size_t limit = dma_get_max_seg_size(dev);
+	size_t map_max = dma_max_mapping_size(dev);
+
+	if (map_max)
+		limit = min(limit, map_max);
+	limit = ALIGN_DOWN(min_t(size_t, limit, UINT_MAX), PAGE_SIZE);
+	if (!limit) {
+		pr_warn_once("DMA mapping limit %zu below PAGE_SIZE; capping segments at PAGE_SIZE\n",
+			     map_max);
+		return PAGE_SIZE;
+	}
+
+	return (unsigned int)limit;
+}
+
+/*
  * Create a shared SG mapping for a user buffer; splits attach via mx_sg_context_get/put.
  * Caller owns the initial refcount.  Returns ERR_PTR on failure so callers can distinguish
  * -EFAULT (bad addr) / -EIO (dma_map) / -ENOMEM (alloc); partial state is freed via put.
@@ -163,7 +187,9 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
 	} else {
-		ret = sg_alloc_table_from_pages(sgt, ctx->pages, pages_nr, offset, total_size, GFP_KERNEL);
+		ret = sg_alloc_table_from_pages_segment(sgt, ctx->pages, pages_nr, offset, total_size,
+						       mx_max_sg_segment(&mx_pdev->pdev->dev),
+						       GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
 			goto err;
@@ -551,9 +577,13 @@ static void mx_transfer_wait_work(struct work_struct *work)
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
-	if (!transfer->command) {
-		pr_warn("Failed to create_command_sg (id=%u)\n", transfer->id);
-		return -ENOMEM;
+	/* IS_ERR() lets a bare NULL through as success, so reject it explicitly. */
+	if (IS_ERR_OR_NULL(transfer->command)) {
+		int ret = transfer->command ? PTR_ERR(transfer->command) : -ENOMEM;
+
+		transfer->command = NULL;
+		pr_warn("Failed to create_command_sg (id=%u, err=%d)\n", transfer->id, ret);
+		return ret;
 	}
 
 	transfer->mx_pdev = mx_pdev;
@@ -577,7 +607,7 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 
 	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
 	if (ret < 0) {
-		release_mx_transfer(transfer);
+		mx_transfer_destroy_sg(mx_pdev, transfer);
 		return ret;
 	}
 
@@ -595,7 +625,6 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer **transfers, int opcode, int count, bool nowait)
 {
-	int initialized_count = 0;
 	ssize_t transferred = 0;
 	ssize_t err = 0;
 	size_t total_size = 0;
@@ -607,15 +636,14 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		if (ret < 0)
 			break;
 		total_size += transfers[i]->size;
-		initialized_count++;
 	}
 
 	if (ret < 0) {
-		for (i = 0; i < initialized_count; i++)
+		/* Every index gets the full teardown regardless of how far init got: the one
+		 * that failed may already hold a desc list, and the ones never attempted have
+		 * an empty list that desc_list_free() ignores. */
+		for (i = 0; i < count; i++)
 			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
-
-		for (i = initialized_count; i < count; i++)
-			release_mx_transfer(transfers[i]);
 
 		kfree(transfers);
 		return ret;

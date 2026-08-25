@@ -51,28 +51,45 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 	return -EINVAL;
 }
 
-/* First PRP chunk length within an SG entry starting at intra_off; truncates so subsequent chunks
- * land on dma_size boundaries.  Returns dma_size when already aligned.  Works for arbitrary
- * dma_size (compiler folds the modulo to a bitmask when dma_size is a known power of 2). */
-size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
+/* Chunk length from dma_addr to the next dma_size boundary; dma_size must be a power of 2
+ * (mask instead of modulo: a 64-bit div would not link on 32-bit kernels). */
+static size_t prp_chunk_len_at(dma_addr_t dma_addr, size_t dma_size)
 {
-	size_t off_in_page = (sg->offset + intra_off) & (PAGE_SIZE - 1);
-	size_t rem = off_in_page % dma_size;
+	size_t rem = (size_t)(dma_addr & (dma_size - 1));
 
 	return rem ? (dma_size - rem) : dma_size;
 }
 
-/* Count PRP descriptors needed for byte_size bytes starting at (sg, intra_off); caller must
- * pre-locate via mx_sg_locate.  skip_first subtracts one (when caller stashes the first DMA
- * address inline in prp_entry1).  sg/intra_off are by-value so caller's walking state survives. */
-size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
-			       size_t byte_size, size_t dma_size, bool skip_first)
+/* First PRP chunk length at (sg, intra_off): distance to the next dma_size boundary of the
+ * mapped DMA address (the device splits by the address it receives; SWIOTLB may not preserve
+ * the CPU page offset), clamped to the entry's remaining bytes. */
+size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
+{
+	size_t len = prp_chunk_len_at(sg_dma_address(sg) + intra_off, dma_size);
+
+	return min_t(size_t, len, sg_dma_len(sg) - intra_off);
+}
+
+/* Count PRP descriptors for byte_size bytes at (sg, intra_off) and verify the slice is
+ * expressible as a PRP list; caller must pre-locate via mx_sg_locate.  sg/intra_off are by-value
+ * so the caller's walking state survives.
+ *
+ * The device receives no per-descriptor lengths: it takes the first chunk as the distance to the
+ * next dma_size boundary and every later one as a full dma_size.  Only the first descriptor may
+ * therefore start mid-chunk and only the last may be short, which holds exactly when every entry
+ * but the last ends on a dma_size boundary and every entry but the first starts on one.
+ * dma_set_min_align_mask() keeps mappings compliant; a violation means the device would misplace
+ * data, so reject it (-EINVAL) instead. */
+int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
+			    size_t dma_size, size_t *out_cnt)
 {
 	size_t remaining = byte_size;
 	size_t total = 0;
+	dma_addr_t end;
 
+	*out_cnt = 0;
 	if (byte_size == 0)
-		return 0;
+		return -EINVAL;
 
 	while (remaining > 0 && sg) {
 		size_t avail = sg_dma_len(sg) - intra_off;
@@ -88,19 +105,41 @@ size_t mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off,
 		if (remaining == 0)
 			break;
 
+		end = sg_dma_address(sg) + intra_off + consumed;
+		if (end & (dma_size - 1)) {
+			pr_warn_ratelimited("sg entry ends off a %zu-byte chunk boundary (end=%pad)\n",
+					    dma_size, &end);
+			return -EINVAL;
+		}
+
 		sg = sg_next(sg);
 		intra_off = 0;
+
+		/* Checked separately from the end above: only a trailing entry may be short, so
+		 * its start alignment is not implied by any entry's end. */
+		if (sg && (sg_dma_address(sg) & (dma_size - 1))) {
+			pr_warn_ratelimited("sg entry starts off a %zu-byte chunk boundary (dma=%pad)\n",
+					    dma_size, &sg->dma_address);
+			return -EINVAL;
+		}
 	}
 
-	if (skip_first && total > 0)
-		total--;
+	if (remaining) {
+		pr_warn_ratelimited("sg mapping short by %zu bytes\n", remaining);
+		return -EINVAL;
+	}
 
-	return total;
+	*out_cnt = total;
+	return 0;
 }
 
-uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
-			   struct mx_transfer *transfer, size_t dma_size,
-			   int descs_per_list, bool skip_first_entry)
+/* desc_cnt: descriptors this call will emit, i.e. mx_get_total_desc_count() less the one the
+ * caller stashes inline when skip_first_entry.  Required: the caller has already walked the
+ * slice, and recomputing here would only add a way for the two walks to disagree. */
+int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
+		      struct mx_transfer *transfer, size_t dma_size,
+		      int descs_per_list, bool skip_first_entry,
+		      size_t desc_cnt, uint64_t *out_ba)
 {
 	struct sg_table *sgt = &transfer->sg_ctx->sgt;
 	size_t byte_offset = transfer->sg_byte_offset;
@@ -115,22 +154,24 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	int list_cnt, list_idx, desc_idx;
 	int ret;
 
+	*out_ba = 0;
+
 	ret = mx_sg_locate(sgt, byte_offset, &sg, &intra_off);
 	if (ret) {
 		pr_warn("Failed to locate sg slice (byte_offset=%zu)\n", byte_offset);
-		return 0;
+		return ret;
 	}
 
-	total_desc_cnt = mx_get_total_desc_count(sg, intra_off, remaining, dma_size, skip_first_entry);
+	total_desc_cnt = desc_cnt;
 	if (total_desc_cnt == 0) {
 		pr_warn("desc count is 0 (byte_size=%zu, skip_first=%d)\n", remaining, skip_first_entry);
-		return 0;
+		return -EINVAL;
 	}
 	list_cnt = mx_get_list_count(total_desc_cnt, descs_per_list);
 	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
-		return 0;
+		return ret;
 	}
 
 	list_idx = 0;
@@ -152,20 +193,29 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			if (!sg) {
 				pr_warn("sg_next NULL after skip_first\n");
 				desc_list_free(mx_pdev, transfer);
-				return 0;
+				return -EINVAL;
 			}
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		len = min3((size_t)dma_size, entry_avail, remaining);
+		if (dma_addr & (dma_size - 1))
+			goto misaligned;
+		len = min3(dma_size, entry_avail, remaining);
 	}
 
 	while (remaining > 0) {
 		if (desc_idx == descs_per_list - 1 && total_desc_cnt > 1) {
+			if (list_idx + 1 >= list_cnt)
+				goto overrun;
 			desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
 			desc = (uint64_t *)transfer->desc_list_va[list_idx];
 			desc_idx = 0;
 		}
+
+		/* total_desc_cnt is the allocation basis; emitting past it would leave the loop
+		 * writing off the end of the current dma_pool page. */
+		if (desc_idx >= descs_per_list || total_desc_cnt == 0)
+			goto overrun;
 
 		desc[desc_idx++] = dma_addr;
 		dma_addr += len;
@@ -181,15 +231,34 @@ uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			if (!sg) {
 				pr_warn("sg_next NULL mid-walk (remaining=%zu)\n", remaining);
 				desc_list_free(mx_pdev, transfer);
-				return 0;
+				return -EINVAL;
 			}
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		len = min3((size_t)dma_size, entry_avail, remaining);
+		/* Past the first chunk the device consumes a full dma_size per descriptor, so emit
+		 * that and rely on mx_get_total_desc_count() having rejected any layout where it
+		 * would not fit.  Re-checked rather than re-derived: a short chunk here would be
+		 * read long by the device. */
+		if (dma_addr & (dma_size - 1))
+			goto misaligned;
+		len = min3(dma_size, entry_avail, remaining);
 	}
 
-	return transfer->desc_list_ba[0];
+	*out_ba = transfer->desc_list_ba[0];
+	return 0;
+
+misaligned:
+	pr_warn("desc walk left a %zu-byte chunk boundary (dma=%pad, remaining=%zu)\n",
+		dma_size, &dma_addr, remaining);
+	desc_list_free(mx_pdev, transfer);
+	return -EINVAL;
+
+overrun:
+	pr_warn("desc count disagrees with emit walk (remaining=%zu, list=%d/%d, idx=%d)\n",
+		remaining, list_idx, list_cnt, desc_idx);
+	desc_list_free(mx_pdev, transfer);
+	return -EINVAL;
 }
 
 /******************************************************************************/
