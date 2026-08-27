@@ -321,7 +321,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	uint64_t q_offset;
 	uint64_t ctx;
 
-	queue = devm_kzalloc(dev, sizeof(struct mx_queue_v1), GFP_KERNEL);
+	queue = kzalloc(sizeof(*queue), GFP_KERNEL);
 	if (!queue) {
 		pr_err("Failed to allocate memory for mx_queue_v1\n");
 		return -ENOMEM;
@@ -339,6 +339,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	ctx = readq(ctx_addr);
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
+		kfree(queue);
 		return -EINVAL;
 	}
 	mx_mbox_init(&queue->sq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
@@ -348,6 +349,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	ctx = readq(ctx_addr);
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
+		kfree(queue);
 		return -EINVAL;
 	}
 	mx_mbox_init(&queue->cq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
@@ -366,8 +368,12 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {
-		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
-		return PTR_ERR(mx_pdev->submit_thread);
+		int ret = PTR_ERR(mx_pdev->submit_thread);
+
+		pr_err("Failed to create submit thread (err=%d)\n", ret);
+		mx_pdev->submit_thread = NULL;
+		kfree(queue);
+		return ret;
 	}
 	/*
 	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
@@ -380,9 +386,14 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
-		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		int ret = PTR_ERR(mx_pdev->complete_thread);
+
+		pr_err("Failed to create complete thread (err=%d)\n", ret);
+		mx_pdev->complete_thread = NULL;
 		kthread_stop(mx_pdev->submit_thread);
-		return PTR_ERR(mx_pdev->complete_thread);
+		mx_pdev->submit_thread = NULL;
+		kfree(queue);
+		return ret;
 	}
 	sched_set_fifo_low(mx_pdev->complete_thread);
 
@@ -399,13 +410,63 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+static void free_mx_queue(struct mx_pci_dev *mx_pdev)
+{
+	kfree(mx_pdev->io_queue);
+	mx_pdev->io_queue = NULL;
+}
+
+static void mx_bar_vma_open(struct vm_area_struct *vma)
+{
+	struct mx_bar_vma *bar_vma = vma->vm_private_data;
+	struct mx_pci_dev *mx_pdev = bar_vma->mx_pdev;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	refcount_inc(&bar_vma->refs);
+	mx_pdev->bar_active_vmas++;
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
+}
+
+static void mx_bar_vma_close(struct vm_area_struct *vma)
+{
+	struct mx_bar_vma *bar_vma = vma->vm_private_data;
+	struct mx_pci_dev *mx_pdev = bar_vma->mx_pdev;
+	bool last = false;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	if (WARN_ON_ONCE(!mx_pdev->bar_active_vmas))
+		goto out_unlock;
+	mx_pdev->bar_active_vmas--;
+	last = refcount_dec_and_test(&bar_vma->refs);
+	if (last)
+		list_del(&bar_vma->entry);
+out_unlock:
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	if (last) {
+		kfree(bar_vma);
+		mx_pdev_put(mx_pdev);
+	}
+}
+
+static const struct vm_operations_struct mx_bar_vm_ops = {
+	.open = mx_bar_vma_open,
+	.close = mx_bar_vma_close,
+};
+
 static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 			     struct vm_area_struct *vma)
 {
+	struct mx_bar_vma *bar_vma;
 	resource_size_t vm_size;
 	unsigned long pfn;
 	uint32_t qid;
 	int ret;
+
+	bar_vma = kzalloc(sizeof(*bar_vma), GFP_KERNEL);
+	if (!bar_vma)
+		return -ENOMEM;
+	bar_vma->mx_pdev = mx_pdev;
+	bar_vma->mapping = vma->vm_file->f_mapping;
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
 
@@ -456,15 +517,21 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
 				 vma->vm_page_prot);
 	if (!ret) {
-		/*
-		 * All opens of this cdev share inode->i_mapping, so one saved
-		 * address_space is enough to revoke every BAR mapping on remove.
-		 */
-		mx_pdev->mmap_mapping = vma->vm_file->f_mapping;
+		/* The VMA may outlive the character-device file. One device reference
+		 * follows the shared bar_vma object across fork and is dropped by the
+		 * last vm_close(). */
+		kref_get(&mx_pdev->refcount);
+		refcount_set(&bar_vma->refs, 1);
+		list_add_tail(&bar_vma->entry, &mx_pdev->bar_mappings);
+		mx_pdev->bar_active_vmas++;
+		vma->vm_ops = &mx_bar_vm_ops;
+		vma->vm_private_data = bar_vma;
+		bar_vma = NULL;
 	}
 
 out_unlock:
 	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	kfree(bar_vma);
 	return ret;
 }
 
@@ -472,9 +539,9 @@ void register_mx_ops_v1(struct mx_operations *ops)
 {
 	ops->init_queue =  init_mx_queue;
 	ops->release_queue = release_mx_queue;
+	ops->free_queue = free_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 	ops->create_command_passthru = create_mx_command_passthru;
 	ops->bar_mmap = mxdma_bar_mmap_v1;
 }
-

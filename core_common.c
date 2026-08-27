@@ -6,6 +6,7 @@
 #include "trace.h"
 #else
 #define trace_mx_dma_xfer_submit(xfer_id, no_completion)			do { } while (0)
+#define trace_mx_dma_xfer_post_submit(dev_id, pushed_count)			do { } while (0)
 #define trace_mx_dma_xfer_complete(xfer_id, status, result, is_zombie)		do { } while (0)
 #define trace_mx_dma_xfer_complete_orphan(xfer_id, status, result)		do { } while (0)
 #endif
@@ -307,12 +308,14 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
 		if (ret)
 			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
+	mx_pdev->submit_thread = NULL;
 
 	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
 		ret = kthread_stop(mx_pdev->complete_thread);
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
+	mx_pdev->complete_thread = NULL;
 }
 
 /******************************************************************************/
@@ -372,7 +375,7 @@ int mx_submit_handler(void *arg)
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 	unsigned int idle_count = 0;
-	bool pushed_any;
+	unsigned int pushed_count;
 	bool lv_on;
 
 	while (!kthread_should_stop()) {
@@ -380,7 +383,7 @@ int mx_submit_handler(void *arg)
 				!list_empty(&q->sq_list),
 				POLLING_INTERVAL_MSEC);
 
-		pushed_any = false;
+		pushed_count = 0;
 		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		spin_lock_irqsave(&q->sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
@@ -392,7 +395,7 @@ int mx_submit_handler(void *arg)
 
 			ops->push_command(q, transfer->command);
 			list_del_init(&transfer->entry);
-			pushed_any = true;
+			pushed_count++;
 
 			trace_mx_dma_xfer_submit((u32)transfer->id, transfer->no_completion);
 
@@ -416,8 +419,11 @@ int mx_submit_handler(void *arg)
 
 		if (ops->post_submit)
 			ops->post_submit(q);
+		if (pushed_count)
+			trace_mx_dma_xfer_post_submit(q->mx_pdev->dev_id,
+						      pushed_count);
 
-		if (pushed_any)
+		if (pushed_count)
 			idle_count = 0;
 		else
 			poll_backoff(&idle_count);
@@ -432,6 +438,7 @@ int mx_complete_handler(void *arg)
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer;
 	struct mx_completion_info info;
+	unsigned long id_flags;
 	unsigned int idle_count = 0;
 
 	while (!kthread_should_stop()) {
@@ -463,7 +470,7 @@ int mx_complete_handler(void *arg)
 			/* Any normal completion also ends the verify window — resume held submits. */
 			atomic_set(&q->lv_inflight, 0);
 
-			transfer = find_transfer_by_id(info.id);
+			transfer = transfer_id_claim_completion(info.id, &id_flags);
 			if (!transfer) {
 				trace_mx_dma_xfer_complete_orphan((u32)info.id, info.status, info.result);
 				dev_warn_ratelimited(q->dev,
@@ -474,21 +481,19 @@ int mx_complete_handler(void *arg)
 			trace_mx_dma_xfer_complete((u32)info.id, info.status, info.result,
 					READ_ONCE(transfer->is_zombie));
 
-			/*
-			 * Claim wait_count decrement — prevents double decrement
-			 * if zombie_cleanup races with this completion.
-			 */
-			if (atomic_cmpxchg(&transfer->wait_claimed, 0, 1) != 0)
-				continue;
-
 			atomic_dec(&q->wait_count);
 
-			if (READ_ONCE(transfer->is_zombie))
+			if (READ_ONCE(transfer->is_zombie)) {
+				transfer_id_complete_unlock(id_flags);
 				continue;
+			}
 
 			transfer->result = info.result;
 			transfer->status = info.status;
 			complete(&transfer->done);
+			/* The waiter/cleaner serializes its final free on id_lock.
+			 * Do not touch transfer after releasing completion ownership. */
+			transfer_id_complete_unlock(id_flags);
 		}
 
 		if (ops->post_complete)

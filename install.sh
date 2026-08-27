@@ -109,10 +109,8 @@ install_dkms() {
     # kernel absent from this root, so the clean silently does nothing and the
     # artifacts get copied.
     rm -rf "${SRC_DIR}"
-    mkdir -p "${SRC_DIR}/scripts"
     make BUILDSYSTEM_DIR="$KDIR" clean 2>/dev/null || true
-    cp -a Makefile dkms.conf *.c *.h "${SRC_DIR}/"
-    cp -a scripts/dkms-post-install.sh "${SRC_DIR}/scripts/"
+    ./scripts/stage-dkms-source.sh "${SRC_DIR}"
 
     # DKMS resolves the tree as /lib/modules/<kver>/build on its own, so only a
     # tree outside that path has to be spelled out.

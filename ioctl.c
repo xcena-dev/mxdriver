@@ -19,46 +19,50 @@
 
 /* Traced wrappers around the four ctrl/data primitives. They are inlined and,
  * when tracing is compiled out, collapse to a direct call. */
-static __always_inline ssize_t traced_read_ctrl(struct mx_pci_dev *mx_pdev, uint32_t qid,
+static __always_inline ssize_t traced_read_ctrl(struct mx_file_ctx *ctx, uint32_t qid,
 		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
+	struct mx_pci_dev *mx_pdev __maybe_unused = ctx->mx_pdev;
 	ssize_t ret;
 
 	trace_mx_dma_ctrl_read_enter(mx_pdev->dev_id, qid, opcode, size, (u64)*fpos, false);
-	ret = read_ctrl_from_device(mx_pdev, buf, size, fpos, opcode);
+	ret = read_ctrl_from_device(ctx, buf, size, fpos, opcode);
 	trace_mx_dma_ctrl_read_exit(mx_pdev->dev_id, qid, opcode, ret);
 	return ret;
 }
 
-static __always_inline ssize_t traced_write_ctrl(struct mx_pci_dev *mx_pdev, uint32_t qid,
+static __always_inline ssize_t traced_write_ctrl(struct mx_file_ctx *ctx, uint32_t qid,
 		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
+	struct mx_pci_dev *mx_pdev __maybe_unused = ctx->mx_pdev;
 	ssize_t ret;
 
 	trace_mx_dma_ctrl_write_enter(mx_pdev->dev_id, qid, opcode, size, (u64)*fpos, nowait);
-	ret = write_ctrl_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
+	ret = write_ctrl_to_device(ctx, buf, size, fpos, opcode, nowait);
 	trace_mx_dma_ctrl_write_exit(mx_pdev->dev_id, qid, opcode, ret);
 	return ret;
 }
 
-static __always_inline ssize_t traced_read_data(struct mx_pci_dev *mx_pdev, uint32_t qid,
+static __always_inline ssize_t traced_read_data(struct mx_file_ctx *ctx, uint32_t qid,
 		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
+	struct mx_pci_dev *mx_pdev __maybe_unused = ctx->mx_pdev;
 	ssize_t ret;
 
 	trace_mx_dma_data_read_enter(mx_pdev->dev_id, qid, opcode, size, (u64)*fpos, false);
-	ret = read_data_from_device(mx_pdev, buf, size, fpos, opcode);
+	ret = read_data_from_device(ctx, buf, size, fpos, opcode);
 	trace_mx_dma_data_read_exit(mx_pdev->dev_id, qid, opcode, ret);
 	return ret;
 }
 
-static __always_inline ssize_t traced_write_data(struct mx_pci_dev *mx_pdev, uint32_t qid,
+static __always_inline ssize_t traced_write_data(struct mx_file_ctx *ctx, uint32_t qid,
 		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
+	struct mx_pci_dev *mx_pdev __maybe_unused = ctx->mx_pdev;
 	ssize_t ret;
 
 	trace_mx_dma_data_write_enter(mx_pdev->dev_id, qid, opcode, size, (u64)*fpos, nowait);
-	ret = write_data_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
+	ret = write_data_to_device(ctx, buf, size, fpos, opcode, nowait);
 	trace_mx_dma_data_write_exit(mx_pdev->dev_id, qid, opcode, ret);
 	return ret;
 }
@@ -138,6 +142,25 @@ struct mx_ioctl_protocol_cmd
 static_assert(_IOC_NR(MX_IOCTL_REGISTER_MBOX) == 1,  "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 static_assert(_IOC_NR(MX_IOCTL_HIO_RECV)      == 10, "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 
+bool mx_ioctl_is_direct_cmd(unsigned int cmd)
+{
+	switch (cmd) {
+	case MX_IOCTL_REGISTER_MBOX:
+	case MX_IOCTL_INIT_MBOX:
+	case MX_IOCTL_SEND_CMD_WITH_DATA:
+	case MX_IOCTL_RECV_CMDS:
+	case MX_IOCTL_SEND_CMDS:
+	case MX_IOCTL_READ_DATA:
+	case MX_IOCTL_WRITE_DATA:
+	case MX_IOCTL_PASSTHRU_CMD:
+	case MX_IOCTL_HIO_SEND:
+	case MX_IOCTL_HIO_RECV:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
 	mbox_index_t head, tail;
@@ -166,14 +189,14 @@ static uint32_t get_popable_count(struct mx_mbox *mbox)
 
 /* Returns ERR_PTR on failure so the caller can propagate the real errno
  * (invalid context vs. failed read vs. OOM). */
-static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_addr, uint64_t data_addr)
+static struct mx_mbox *create_mx_mbox(struct mx_file_ctx *file_ctx,
+		uint64_t ctx_addr, uint64_t data_addr)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_mbox *mbox;
 	uint64_t ctx;
 	ssize_t ret;
 
-	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
+	ret = read_ctrl_from_device(file_ctx, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&ctx_addr, IO_OPCODE_SQ_READ);
 	if (ret <= 0)
 		return ERR_PTR(ret < 0 ? ret : -EIO);
 
@@ -182,7 +205,7 @@ static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_a
 		return ERR_PTR(-EINVAL);
 	}
 
-	mbox = devm_kzalloc(dev, sizeof(struct mx_mbox), GFP_KERNEL);
+	mbox = kzalloc(sizeof(*mbox), GFP_KERNEL);
 	if (!mbox)
 		return ERR_PTR(-ENOMEM);
 
@@ -191,13 +214,14 @@ static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_a
 	return mbox;
 }
 
-static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
+static int reset_mx_mbox(struct mx_file_ctx *file_ctx, struct mx_mbox *mbox)
 {
 	uint64_t ctx;
 	ssize_t ret;
 
 	mutex_lock(&mbox->lock);
-	ret = read_ctrl_from_device(mx_pdev, (char __user *)&ctx, sizeof(uint64_t), (loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	ret = read_ctrl_from_device(file_ctx, (char __user *)&ctx, sizeof(uint64_t),
+			(loff_t *)&mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
 	if (ret <= 0) {
 		mutex_unlock(&mbox->lock);
 		return ret < 0 ? ret : -EIO;
@@ -228,8 +252,9 @@ static bool registered_mbox_matches(struct mx_pci_dev *mx_pdev, uint32_t qid,
 	       mx_pdev->cq_mbox_list[qid]->r_ctx_addr == info->cq_ctx_addr;
 }
 
-static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_register_mbox(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
+	struct mx_pci_dev *mx_pdev = file_ctx->mx_pdev;
 	struct mx_ioctl_mbox_info mbox_info;
 	struct mx_mbox *sq_mbox, *cq_mbox;
 
@@ -248,7 +273,7 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	/* Mutually exclusive with an actively mapped BAR: a mapped BAR lets userspace drive
 	 * the mailbox region, so a kernel mailbox would double-own it. mapping_mapped() reads
 	 * live VMAs, so registration reopens once userspace munmaps the BAR. */
-	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
+	if (mx_pdev->bar_active_vmas) {
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
 		return -EBUSY;
 	}
@@ -263,13 +288,13 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	}
 	mutex_unlock(&mx_pdev->bar_mmap_lock);
 
-	sq_mbox = create_mx_mbox(mx_pdev, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
+	sq_mbox = create_mx_mbox(file_ctx, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
 	if (IS_ERR(sq_mbox))
 		return PTR_ERR(sq_mbox);
 
-	cq_mbox = create_mx_mbox(mx_pdev, mbox_info.cq_ctx_addr, mbox_info.cq_data_addr);
+	cq_mbox = create_mx_mbox(file_ctx, mbox_info.cq_ctx_addr, mbox_info.cq_data_addr);
 	if (IS_ERR(cq_mbox)) {
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(sq_mbox);
 		return PTR_ERR(cq_mbox);
 	}
 
@@ -277,18 +302,18 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	 * the lock a concurrent mmap may have claimed the BAR, or another thread may
 	 * have registered this qid. */
 	mutex_lock(&mx_pdev->bar_mmap_lock);
-	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
+	if (mx_pdev->bar_active_vmas) {
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
-		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(cq_mbox);
+		kfree(sq_mbox);
 		return -EBUSY;
 	}
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
 		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
 
 		mutex_unlock(&mx_pdev->bar_mmap_lock);
-		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(cq_mbox);
+		kfree(sq_mbox);
 		return matches ? 0 : -EINVAL;
 	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
@@ -298,8 +323,23 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
+void mx_free_registered_mboxes(struct mx_pci_dev *mx_pdev)
 {
+	u32 qid;
+
+	mutex_lock(&mx_pdev->bar_mmap_lock);
+	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
+		kfree(mx_pdev->sq_mbox_list[qid]);
+		kfree(mx_pdev->cq_mbox_list[qid]);
+		mx_pdev->sq_mbox_list[qid] = NULL;
+		mx_pdev->cq_mbox_list[qid] = NULL;
+	}
+	mutex_unlock(&mx_pdev->bar_mmap_lock);
+}
+
+static long ioctl_init_mbox(struct mx_file_ctx *file_ctx, unsigned long arg)
+{
+	struct mx_pci_dev *mx_pdev = file_ctx->mx_pdev;
 	struct mx_mbox *sq_mbox, *cq_mbox;
 	uint32_t qid;
 	int ret;
@@ -314,19 +354,20 @@ static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	/* Each reset is an idempotent device-context refresh, so a failed INIT_MBOX
 	 * is always safe to retry even if the SQ was already refreshed. */
-	ret = reset_mx_mbox(mx_pdev, sq_mbox);
+	ret = reset_mx_mbox(file_ctx, sq_mbox);
 	if (ret)
 		return ret;
 
-	ret = reset_mx_mbox(mx_pdev, cq_mbox);
+	ret = reset_mx_mbox(file_ctx, cq_mbox);
 	if (ret)
 		return ret;
 
 	return 0;
 }
 
-static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_send_cmd_with_data(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
+	struct mx_pci_dev *mx_pdev = file_ctx->mx_pdev;
 	struct mx_ioctl_cmd_with_data send_cmd;
 	struct mx_mbox *sq_mbox;
 	uint64_t data_addr;
@@ -343,7 +384,7 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 		return -EINVAL;
 
 	if (send_cmd.user_addr && send_cmd.size > 0) {
-		ssize_t wret = traced_write_data(mx_pdev, send_cmd.qid, send_cmd.user_addr,
+		ssize_t wret = traced_write_data(file_ctx, send_cmd.qid, send_cmd.user_addr,
 				send_cmd.size, &send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
 
 		/* Don't advance the mailbox for a command whose payload never landed. */
@@ -355,7 +396,7 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	while (is_full(sq_mbox)) {
 		mbox_context_t ctx;
 
-		if (traced_read_ctrl(mx_pdev, send_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
+		if (traced_read_ctrl(file_ctx, send_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
 				(loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
 			mutex_unlock(&sq_mbox->lock);
 			return -EINTR;
@@ -365,7 +406,7 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
 
-	cret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmd, sizeof(uint64_t),
+	cret = traced_write_data(file_ctx, send_cmd.qid, (const char __user *)send_cmd.cmd, sizeof(uint64_t),
 			(loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
 	if (cret < (ssize_t)sizeof(uint64_t)) {
 		mutex_unlock(&sq_mbox->lock);
@@ -375,15 +416,16 @@ static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long a
 	/* Advance and publish the tail only after the command word has landed;
 	 * otherwise the device would consume a stale slot on a failed write. */
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
-	traced_write_ctrl(mx_pdev, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
+	traced_write_ctrl(file_ctx, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
 	mutex_unlock(&sq_mbox->lock);
 
 	return 0;
 }
 
-static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_send_cmds(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
+	struct mx_pci_dev *mx_pdev = file_ctx->mx_pdev;
 	struct mx_ioctl_cmds send_cmd;
 	struct mx_mbox *sq_mbox;
 	uint64_t data_addr;
@@ -411,7 +453,7 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (count < send_cmd.nr_cmds) {
 		mbox_context_t ctx;
 
-		if (traced_read_ctrl(mx_pdev, send_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
+		if (traced_read_ctrl(file_ctx, send_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
 				(loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ) <= 0) {
 			mutex_unlock(&sq_mbox->lock);
 			return -EINTR;
@@ -428,7 +470,7 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
 
-	wret = traced_write_data(mx_pdev, send_cmd.qid, (const char __user *)send_cmd.cmds,
+	wret = traced_write_data(file_ctx, send_cmd.qid, (const char __user *)send_cmd.cmds,
 			sizeof(uint64_t) * count, (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
 	if (wret < (ssize_t)(sizeof(uint64_t) * count)) {
 		mutex_unlock(&sq_mbox->lock);
@@ -437,7 +479,7 @@ static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	/* Advance and publish the tail only after the batch has landed. */
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, count, sq_mbox->depth);
-	traced_write_ctrl(mx_pdev, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
+	traced_write_ctrl(file_ctx, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
 
 out:
@@ -450,8 +492,9 @@ out:
 	return 0;
 }
 
-static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_recv_cmds(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
+	struct mx_pci_dev *mx_pdev = file_ctx->mx_pdev;
 	struct mx_ioctl_cmds recv_cmd;
 	struct mx_mbox *cq_mbox;
 	mbox_context_t ctx;
@@ -469,7 +512,7 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return -EINVAL;
 
 	mutex_lock(&cq_mbox->lock);
-	if (traced_read_ctrl(mx_pdev, recv_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
+	if (traced_read_ctrl(file_ctx, recv_cmd.qid, (char __user *)&ctx.u64, sizeof(uint64_t),
 			(loff_t *)&cq_mbox->r_ctx_addr, IO_OPCODE_CQ_READ) <= 0) {
 		mutex_unlock(&cq_mbox->lock);
 		return -EINTR;
@@ -486,9 +529,9 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	data_addr = cq_mbox->data_addr + get_data_offset(cq_mbox->ctx.head);
 	cq_mbox->ctx.head = get_next_index(cq_mbox->ctx.head, count, cq_mbox->depth);
 
-	traced_read_data(mx_pdev, recv_cmd.qid, (char __user *)recv_cmd.cmds, count * sizeof(uint64_t),
+	traced_read_data(file_ctx, recv_cmd.qid, (char __user *)recv_cmd.cmds, count * sizeof(uint64_t),
 			(loff_t *)&data_addr, IO_OPCODE_CONTEXT_READ);
-	traced_write_ctrl(mx_pdev, recv_cmd.qid, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t),
+	traced_write_ctrl(file_ctx, recv_cmd.qid, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&cq_mbox->w_ctx_addr, IO_OPCODE_CQ_WRITE, true);
 
 out:
@@ -501,7 +544,7 @@ out:
 	return 0;
 }
 
-static long ioctl_read_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_read_data(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
 	struct mx_ioctl_data read_data;
 	ssize_t ret;
@@ -512,7 +555,8 @@ static long ioctl_read_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (read_data.size == 0 || !read_data.user_addr)
 		return -EINVAL;
 
-	ret = read_data_from_device_parallel(mx_pdev, (char __user *)read_data.user_addr, read_data.size,
+	ret = read_data_from_device_parallel(file_ctx, (char __user *)read_data.user_addr,
+			read_data.size,
 			(loff_t *)&read_data.device_addr, IO_OPCODE_DATA_READ);
 	if (ret < 0)
 		return ret;
@@ -520,7 +564,7 @@ static long ioctl_read_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_write_data(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
 	struct mx_ioctl_data write_data;
 	ssize_t ret;
@@ -531,7 +575,8 @@ static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (write_data.size == 0 || !write_data.user_addr)
 		return -EINVAL;
 
-	ret = write_data_to_device_parallel(mx_pdev, (const char __user *)write_data.user_addr, write_data.size,
+	ret = write_data_to_device_parallel(file_ctx,
+			(const char __user *)write_data.user_addr, write_data.size,
 			(loff_t *)&write_data.device_addr, IO_OPCODE_DATA_WRITE, write_data.no_wait);
 	if (ret < 0)
 		return ret;
@@ -539,7 +584,7 @@ static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static long ioctl_passthru_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_passthru_cmd(struct mx_file_ctx *file_ctx, unsigned long arg)
 {
 	struct mx_ioctl_passthru_cmd cmd;
 	long ret;
@@ -549,8 +594,13 @@ static long ioctl_passthru_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	if (cmd.subopcode > 0xF)
 		return -EINVAL;
+	if (cmd.no_completion) {
+		ret = mx_lease_authorize_no_completion(file_ctx);
+		if (ret)
+			return ret;
+	}
 
-	ret = submit_passthru_command(mx_pdev, cmd.subopcode,
+	ret = submit_passthru_command(file_ctx, cmd.subopcode,
 				      cmd.device_addr, cmd.size, cmd.no_completion,
 				      &cmd.status, &cmd.host_addr);
 	if (ret)
@@ -562,7 +612,8 @@ static long ioctl_passthru_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, int opcode)
+static long ioctl_hio_protocol(struct mx_file_ctx *file_ctx,
+		unsigned long arg, int opcode)
 {
 	struct mx_ioctl_protocol_cmd cmd;
 
@@ -572,47 +623,49 @@ static long ioctl_hio_protocol(struct mx_pci_dev *mx_pdev, unsigned long arg, in
 	if (!cmd.buf)
 		return -EINVAL;
 
-	return submit_protocol_transfer(mx_pdev, cmd.buf, cmd.size, opcode);
+	return submit_protocol_transfer(file_ctx, cmd.buf, cmd.size, opcode);
 }
 
-long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
+long ioctl_to_device(struct mx_file_ctx *file_ctx, unsigned int cmd,
+		unsigned long arg)
 {
+	struct mx_pci_dev *mx_pdev __maybe_unused = file_ctx->mx_pdev;
 	long ret;
 
 	/* Setup-only ioctls bypass tracing — they fire once per mailbox lifetime. */
 	switch (cmd) {
 	case MX_IOCTL_REGISTER_MBOX:
-		return ioctl_register_mbox(mx_pdev, arg);
+		return ioctl_register_mbox(file_ctx, arg);
 	case MX_IOCTL_INIT_MBOX:
-		return ioctl_init_mbox(mx_pdev, arg);
+		return ioctl_init_mbox(file_ctx, arg);
 	}
 
 	trace_mx_dma_ioctl_enter(mx_pdev->dev_id, cmd);
 
 	switch (cmd) {
 	case MX_IOCTL_SEND_CMD_WITH_DATA:
-		ret = ioctl_send_cmd_with_data(mx_pdev, arg);
+		ret = ioctl_send_cmd_with_data(file_ctx, arg);
 		break;
 	case MX_IOCTL_RECV_CMDS:
-		ret = ioctl_recv_cmds(mx_pdev, arg);
+		ret = ioctl_recv_cmds(file_ctx, arg);
 		break;
 	case MX_IOCTL_SEND_CMDS:
-		ret = ioctl_send_cmds(mx_pdev, arg);
+		ret = ioctl_send_cmds(file_ctx, arg);
 		break;
 	case MX_IOCTL_READ_DATA:
-		ret = ioctl_read_data(mx_pdev, arg);
+		ret = ioctl_read_data(file_ctx, arg);
 		break;
 	case MX_IOCTL_WRITE_DATA:
-		ret = ioctl_write_data(mx_pdev, arg);
+		ret = ioctl_write_data(file_ctx, arg);
 		break;
 	case MX_IOCTL_PASSTHRU_CMD:
-		ret = ioctl_passthru_cmd(mx_pdev, arg);
+		ret = ioctl_passthru_cmd(file_ctx, arg);
 		break;
 	case MX_IOCTL_HIO_SEND:
-		ret = ioctl_hio_protocol(mx_pdev, arg, IO_OPCODE_SEND);
+		ret = ioctl_hio_protocol(file_ctx, arg, IO_OPCODE_SEND);
 		break;
 	case MX_IOCTL_HIO_RECV:
-		ret = ioctl_hio_protocol(mx_pdev, arg, IO_OPCODE_RECV);
+		ret = ioctl_hio_protocol(file_ctx, arg, IO_OPCODE_RECV);
 		break;
 	default:
 		pr_warn("unknown ioctl cmd(%u)\n", cmd);

@@ -30,6 +30,15 @@ struct mx_queue_v2 {
 	uint16_t sq_head;
 	uint16_t cq_head;
 	uint16_t cq_phase;
+	uint16_t admin_next_cid;
+	uint16_t admin_pending_cid;
+	uint8_t admin_pending_opcode;
+	bool admin_pending;
+	bool admin_desynced;
+	bool hw_cq_created;
+	bool hw_sq_created;
+	uint16_t hw_cq_id;
+	uint16_t hw_sq_id;
 	void __iomem *db;
 };
 
@@ -346,18 +355,45 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q_depth)
 {
 	queue->depth = q_depth;
-	queue->cqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
+	queue->cqes = dma_alloc_coherent(dev,
+			queue->depth * sizeof(struct mx_completion),
+			&queue->cq_dma_addr, GFP_KERNEL);
 	if (!queue->cqes)
 		return -ENOMEM;
 
-	queue->sqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
-	if (!queue->sqes)
+	queue->sqes = dma_alloc_coherent(dev,
+			queue->depth * sizeof(struct mx_command),
+			&queue->sq_dma_addr, GFP_KERNEL);
+	if (!queue->sqes) {
+		dma_free_coherent(dev,
+				  queue->depth * sizeof(struct mx_completion),
+				  queue->cqes, queue->cq_dma_addr);
+		queue->cqes = NULL;
 		return -ENOMEM;
+	}
 
 	pr_info("Allocated queue (depth=%u, sq_dma_addr=0x%llx, cq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
 			queue->depth, queue->sq_dma_addr, queue->cq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
 
 	return 0;
+}
+
+static void free_queue_storage(struct device *dev, struct mx_queue_v2 *queue)
+{
+	if (!queue)
+		return;
+	if (queue->sqes) {
+		dma_free_coherent(dev,
+				  queue->depth * sizeof(struct mx_command),
+				  queue->sqes, queue->sq_dma_addr);
+		queue->sqes = NULL;
+	}
+	if (queue->cqes) {
+		dma_free_coherent(dev,
+				  queue->depth * sizeof(struct mx_completion),
+				  queue->cqes, queue->cq_dma_addr);
+		queue->cqes = NULL;
+	}
 }
 
 static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queue, uint16_t qid)
@@ -380,7 +416,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
-	struct mx_queue_v2 *queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *queue = kzalloc(sizeof(*queue), GFP_KERNEL);
 	uint32_t aqa;
 	int ret;
 
@@ -390,11 +426,21 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 		return -ENOMEM;
 
 	ret = alloc_queue(dev, queue, NVME_AQ_DEPTH);
-	if (ret)
+	if (ret) {
+		kfree(queue);
 		return ret;
+	}
+
+	queue->common.dev = dev;
+	queue->common.mx_pdev = mx_pdev;
+	atomic_set(&queue->common.wait_count, 0);
+	mx_pdev->admin_queue = (struct mx_queue *)queue;
 
 	aqa = queue->depth - 1;
 	aqa |= aqa << 16;
+	/* From this write onward the device knows host DMA addresses. Any
+	 * ambiguous admin completion must retain this backing until reboot/reset. */
+	mx_pdev->queue_dma_programmed = true;
 	writel(aqa, mx_pdev->bar + 0x0);
 	writeq(queue->sq_dma_addr, mx_pdev->bar + 0x8);
 	writeq(queue->cq_dma_addr, mx_pdev->bar + 0x10);
@@ -403,16 +449,52 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 
 	configure_queue(mx_pdev, queue, 0);
 
-	mx_pdev->admin_queue = (struct mx_queue *)queue;
-
 	return 0;
+}
+
+static void record_admin_terminal(struct mx_queue_v2 *admin_queue,
+				  u8 opcode, u16 status, u64 result)
+{
+	struct mx_queue_v2 *io_queue =
+		(struct mx_queue_v2 *)admin_queue->common.mx_pdev->io_queue;
+
+	if (status || !io_queue)
+		return;
+	switch (opcode) {
+	case ADMIN_OPCODE_CREATE_IO_CQ:
+		io_queue->hw_cq_created = true;
+		io_queue->hw_cq_id = (u16)result;
+		break;
+	case ADMIN_OPCODE_CREATE_IO_SQ:
+		io_queue->hw_sq_created = true;
+		io_queue->hw_sq_id = (u16)result;
+		break;
+	case ADMIN_OPCODE_DELETE_IO_SQ:
+		io_queue->hw_sq_created = false;
+		break;
+	case ADMIN_OPCODE_DELETE_IO_CQ:
+		io_queue->hw_cq_created = false;
+		break;
+	default:
+		break;
+	}
 }
 
 static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
 	struct mx_completion cmpl;
+	struct mx_pci_dev *mx_pdev = queue->common.mx_pdev;
+	u16 cid;
+	u16 status;
 	int timeout = 500;
 	int count = 0;
+
+	if (READ_ONCE(queue->admin_desynced))
+		return false;
+	cid = ++queue->admin_next_cid;
+	if (!cid)
+		cid = ++queue->admin_next_cid;
+	c->command_id = cpu_to_le16(cid);
 
 	for (count = 0; count < timeout; count++) {
 		if (is_pushable(queue))
@@ -421,37 +503,163 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	}
 	if (count >= timeout) {
 		pr_err("Timeout waiting for pushable admin queue\n");
+		/* This command has not been copied to the SQ or doorbelled, so
+		 * there is no ambiguous hardware operation to drain.  The caller
+		 * may retry or unwind using the last terminal queue state. */
 		return false;
 	}
 
 	push_mx_command(queue, c);
 	ring_sq_doorbell(queue);
 	atomic_inc(&queue->common.wait_count);
+	queue->admin_pending = true;
+	queue->admin_pending_cid = cid;
+	queue->admin_pending_opcode = c->opcode;
 
 	for (count = 0; count < timeout; count++) {
-		if (is_popable(queue))
-			break;
+		if (is_popable(queue)) {
+			pop_mx_completion(queue, &cmpl);
+			ring_cq_doorbell(queue);
+			if (le16_to_cpu(cmpl.command_id) != cid) {
+				pr_warn("Ignoring stale admin completion (expected cid=%u, got=%u)\n",
+					cid, le16_to_cpu(cmpl.command_id));
+				continue;
+			}
+			goto terminal;
+		}
 		msleep(1);
 	}
-	if (count >= timeout) {
-		pr_err("Timeout waiting for popable admin queue\n");
+	pr_err("Timeout waiting for admin completion (cid=%u op=%u)\n",
+	       cid, c->opcode);
+	WRITE_ONCE(queue->admin_desynced, true);
+	WRITE_ONCE(mx_pdev->protocol_poisoned, true);
+	return false;
+
+terminal:
+	atomic_dec(&queue->common.wait_count);
+	queue->admin_pending = false;
+	status = le16_to_cpu(cmpl.status) >> 1;
+	record_admin_terminal(queue, c->opcode, status,
+			      le64_to_cpu(cmpl.result));
+	if (status) {
+		pr_err("Admin command cid=%u failed with status=%#x\n", cid, status);
 		return false;
 	}
 
-	pop_mx_completion(queue, &cmpl);
-	ring_cq_doorbell(queue);
-
 	if (result)
-		*result = cmpl.result;
+		*result = le64_to_cpu(cmpl.result);
 
 	return true;
+}
+
+static bool delete_io_sq(struct mx_queue_v2 *admin_queue, uint16_t qid)
+{
+	struct mx_command comm = {};
+
+	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
+	comm.io_queue_info.sq_id = qid;
+	return submit_sync_command(admin_queue, &comm, NULL);
+}
+
+static bool delete_io_cq(struct mx_queue_v2 *admin_queue, uint16_t qid)
+{
+	struct mx_command comm = {};
+
+	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
+	comm.io_queue_info.cq_id = qid;
+	return submit_sync_command(admin_queue, &comm, NULL);
+}
+
+static int drain_pending_admin(struct mx_pci_dev *mx_pdev)
+{
+	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
+	struct mx_completion cmpl;
+	u16 status;
+
+	if (!queue)
+		return 0;
+	if (queue->admin_desynced && !queue->admin_pending)
+		return -EUCLEAN;
+
+	while (queue->admin_pending) {
+		if (pci_dev_is_disconnected(mx_pdev->pdev))
+			return -ENODEV;
+		if (!is_popable(queue)) {
+			msleep(1);
+			continue;
+		}
+		pop_mx_completion(queue, &cmpl);
+		ring_cq_doorbell(queue);
+		if (le16_to_cpu(cmpl.command_id) != queue->admin_pending_cid) {
+			pr_warn_ratelimited("Ignoring stale admin completion while draining (expected cid=%u, got=%u)\n",
+				queue->admin_pending_cid,
+				le16_to_cpu(cmpl.command_id));
+			continue;
+		}
+		atomic_dec(&queue->common.wait_count);
+		queue->admin_pending = false;
+		status = le16_to_cpu(cmpl.status) >> 1;
+		record_admin_terminal(queue, queue->admin_pending_opcode, status,
+				      le64_to_cpu(cmpl.result));
+		if (status)
+			pr_err("Late admin command cid=%u terminated with status=%#x\n",
+			       queue->admin_pending_cid, status);
+	}
+	queue->admin_desynced = false;
+	return 0;
+}
+
+static void disable_admin_queue(struct mx_pci_dev *mx_pdev)
+{
+	/* No admin command is pending when called. Clear device-visible host
+	 * addresses before coherent backing can be freed or Bus Master re-enabled. */
+	writel(0, mx_pdev->bar + 0x0);
+	writeq(0, mx_pdev->bar + 0x8);
+	writeq(0, mx_pdev->bar + 0x10);
+	wmb();
+	mx_pdev->queue_dma_programmed = false;
+}
+
+static int recover_mx_queue(struct mx_pci_dev *mx_pdev)
+{
+	struct mx_queue_v2 *admin_queue =
+		(struct mx_queue_v2 *)mx_pdev->admin_queue;
+	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
+	int ret;
+
+	if (!admin_queue)
+		return 0;
+	ret = drain_pending_admin(mx_pdev);
+	if (ret)
+		return ret;
+	WRITE_ONCE(mx_pdev->protocol_poisoned, false);
+	if (!io_queue) {
+		disable_admin_queue(mx_pdev);
+		return 0;
+	}
+
+	/* A late CREATE may have succeeded. Tear down whatever terminal state was
+	 * recorded, always SQ before its referenced CQ. A fresh timeout is retained
+	 * in admin_pending and the caller retries this recovery without freeing. */
+	if (io_queue->hw_sq_created &&
+	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {
+		WRITE_ONCE(mx_pdev->protocol_poisoned, true);
+		return -EIO;
+	}
+	if (io_queue->hw_cq_created &&
+	    !delete_io_cq(admin_queue, io_queue->hw_cq_id)) {
+		WRITE_ONCE(mx_pdev->protocol_poisoned, true);
+		return -EIO;
+	}
+	disable_admin_queue(mx_pdev);
+	return 0;
 }
 
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
-	struct mx_queue_v2 *io_queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *io_queue = kzalloc(sizeof(*io_queue), GFP_KERNEL);
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
@@ -463,8 +671,19 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		return -ENOMEM;
 
 	ret = alloc_queue(dev, io_queue, 256);
-	if (ret)
+	if (ret) {
+		kfree(io_queue);
 		return ret;
+	}
+	io_queue->common.dev = dev;
+	io_queue->common.mx_pdev = mx_pdev;
+	spin_lock_init(&io_queue->common.sq_lock);
+	INIT_LIST_HEAD(&io_queue->common.sq_list);
+	init_swait_queue_head(&io_queue->common.sq_wait);
+	init_swait_queue_head(&io_queue->common.cq_wait);
+	atomic_set(&io_queue->common.wait_count, 0);
+	atomic_set(&io_queue->common.zombie_wait_count, 0);
+	mx_pdev->io_queue = (struct mx_queue *)io_queue;
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
@@ -473,20 +692,27 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to create IO completion queue\n");
 		return -EIO;
 	}
-	cq_id = le16_to_cpu(result);
+	cq_id = (u16)result;
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
 	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
-		return -EIO;
+		/* A timeout/CID mismatch desynchronizes the admin queue, so no further
+		 * command is safe. A matching error completion is terminal; delete the
+		 * already-created CQ below. */
+		if (READ_ONCE(admin_queue->admin_desynced))
+			return -EIO;
+		ret = -EIO;
+		goto out_delete;
 	}
-	sq_id = le16_to_cpu(result);
+	sq_id = (u16)result;
 
 	if (cq_id != sq_id) {
 		pr_err("Failed to create IO queue (cq_id=%d, sq_id=%d)\n", cq_id, sq_id);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_delete;
 	}
 
 	/* cq_id is device-supplied; its doorbell lives at bar + NVME_REG_DBS +
@@ -496,7 +722,8 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	    mx_pdev->bar_mapped_size) {
 		pr_err("IO queue id %u doorbell exceeds mapped BAR (%llu bytes)\n",
 		       cq_id, (unsigned long long)mx_pdev->bar_mapped_size);
-		return -EIO;
+		ret = -EIO;
+		goto out_delete;
 	}
 
 	pr_info("IO queue created (depth=%u, sq_id=%u, cq_id=%u)\n", io_queue->depth, sq_id, cq_id);
@@ -504,70 +731,77 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	configure_queue(mx_pdev, io_queue, cq_id);
 
 	io_queue->common.ops = &v2_queue_ops;
-	spin_lock_init(&io_queue->common.sq_lock);
-	INIT_LIST_HEAD(&io_queue->common.sq_list);
-	init_swait_queue_head(&io_queue->common.sq_wait);
-	init_swait_queue_head(&io_queue->common.cq_wait);
-	atomic_set(&io_queue->common.wait_count, 0);
-	atomic_set(&io_queue->common.zombie_wait_count, 0);
 	atomic_set(&io_queue->common.lv_health, MX_LIVENESS_ALIVE);
 	io_queue->common.lv_progress_jiffies = jiffies;
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &io_queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {
-		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
-		return PTR_ERR(mx_pdev->submit_thread);
+		ret = PTR_ERR(mx_pdev->submit_thread);
+		pr_err("Failed to create submit thread (err=%d)\n", ret);
+		mx_pdev->submit_thread = NULL;
+		goto out_delete;
 	}
 	/* See core_v1.c: SCHED_FIFO (lowest RT band) for low scheduling latency. */
 	sched_set_fifo_low(mx_pdev->submit_thread);
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &io_queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
-		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		ret = PTR_ERR(mx_pdev->complete_thread);
+		pr_err("Failed to create complete thread (err=%d)\n", ret);
+		mx_pdev->complete_thread = NULL;
 		kthread_stop(mx_pdev->submit_thread);
-		return PTR_ERR(mx_pdev->complete_thread);
+		mx_pdev->submit_thread = NULL;
+		goto out_delete;
 	}
 	sched_set_fifo_low(mx_pdev->complete_thread);
-
-	mx_pdev->io_queue = (struct mx_queue *)io_queue;
 
 	mx_bind_handlers_to_numa(mx_pdev);
 
 	return 0;
+
+out_delete:
+	/* SQ references CQ, so unwind in dependency order. Ambiguous commands are
+	 * retained and drained by recover_mx_queue() during the real unbind. */
+	if (io_queue->hw_sq_created &&
+	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {
+		pr_err("Failed to unwind IO submission queue\n");
+		WRITE_ONCE(mx_pdev->protocol_poisoned, true);
+		return ret;
+	}
+	if (io_queue->hw_cq_created &&
+	    !delete_io_cq(admin_queue, io_queue->hw_cq_id)) {
+		pr_err("Failed to unwind IO completion queue\n");
+		WRITE_ONCE(mx_pdev->protocol_poisoned, true);
+	}
+	return ret;
 }
 
 static int release_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
-	struct mx_command comm = {};
+	bool ok = true;
 
 	if (!admin_queue || !io_queue)
 		return 0;
 
-	/*
-	 * Tear down the device-side queues best-effort. submit_sync_command()
-	 * returns true on success and false on timeout (never -EAGAIN), so a
-	 * wedged device must not abort teardown before the kthreads are stopped.
-	 */
-	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
-	comm.io_queue_info.cq_id = io_queue->qid;
-	if (!submit_sync_command(admin_queue, &comm, NULL))
-		pr_err("Failed to delete IO completion queue\n");
-
-	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
-	comm.io_queue_info.sq_id = io_queue->qid;
-	if (!submit_sync_command(admin_queue, &comm, NULL))
-		pr_err("Failed to delete IO submission queue\n");
-
-	/*
-	 * Must run unconditionally: the submit/complete kthreads dereference the
-	 * io_queue and writel() the BAR doorbell, both freed/unmapped as soon as
-	 * this returns.
-	 */
+	/* No live waiter remains once the per-device workqueue is drained. Stop
+	 * software queue access first, then tear down SQ before its referenced CQ. */
 	mx_stop_queue_threads(mx_pdev);
+	if (io_queue->hw_sq_created &&
+	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {
+		pr_err("Failed to delete IO submission queue\n");
+		ok = false;
+	}
+	if (ok && io_queue->hw_cq_created &&
+	    !delete_io_cq(admin_queue, io_queue->hw_cq_id)) {
+		pr_err("Failed to delete IO completion queue\n");
+		ok = false;
+	}
+	if (ok)
+		disable_admin_queue(mx_pdev);
 
-	return 0;
+	return ok ? 0 : -EIO;
 }
 
 static int init_mx_queue(struct mx_pci_dev *mx_pdev)
@@ -606,11 +840,30 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+static void free_mx_queue(struct mx_pci_dev *mx_pdev)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
+	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
+
+	if (io_queue) {
+		free_queue_storage(dev, io_queue);
+		kfree(io_queue);
+		mx_pdev->io_queue = NULL;
+	}
+	if (admin_queue) {
+		free_queue_storage(dev, admin_queue);
+		kfree(admin_queue);
+		mx_pdev->admin_queue = NULL;
+	}
+}
+
 void register_mx_ops_v2(struct mx_operations *ops)
 {
 	ops->init_queue =  init_mx_queue;
 	ops->release_queue = release_mx_queue;
+	ops->recover_queue = recover_mx_queue;
+	ops->free_queue = free_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 }
-

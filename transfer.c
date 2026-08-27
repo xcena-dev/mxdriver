@@ -39,9 +39,6 @@ module_param(parallel_count, int, 0644);
  */
 static unsigned int parallel_split_ratio = 50;
 module_param(parallel_split_ratio, uint, 0644);
-static unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
-module_param(zombie_grace_ms, int, 0644);
-
 /******************************************************************************/
 /* Shared SG context (pin + dma_map_sg done once, shared across split-transfers) */
 /******************************************************************************/
@@ -288,7 +285,8 @@ static void release_mx_transfer(struct mx_transfer *transfer)
 {
 	if (transfer->sg_ctx)
 		mx_sg_context_put(transfer->sg_ctx);
-	transfer_id_free(transfer->id);
+	transfer_id_free(transfer);
+	mx_lease_transfer_put(transfer);
 	free_mx_transfer(transfer);
 }
 
@@ -463,7 +461,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 {
 	long left_time;
 	ssize_t ret;
-	int state;
+	int state __maybe_unused;
 	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
 	/* Snapshot the per-device toggle once so the whole wait sees a consistent
@@ -574,8 +572,22 @@ static void mx_transfer_wait_work(struct work_struct *work)
 	mx_transfer_wait(mx_pdev, transfer);
 }
 
-static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
+static void mx_transfer_schedule_wait(struct mx_pci_dev *mx_pdev,
+				      struct mx_transfer *transfer)
 {
+	/* Every transfer has a freshly initialized work item. A false return means
+	 * that this exact work is already pending/running; that existing owner must
+	 * remain the sole waiter and reclaimer. Never wait/free it a second time. */
+	WARN_ON_ONCE(!queue_work(mx_pdev->async_wq, &transfer->work));
+}
+
+static int mx_transfer_init_sg(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
+{
+	int ret = mx_lease_transfer_get(ctx, transfer);
+
+	if (ret)
+		return ret;
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
 	/* IS_ERR() lets a bare NULL through as success, so reject it explicitly. */
 	if (IS_ERR_OR_NULL(transfer->command)) {
@@ -599,13 +611,14 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 	release_mx_transfer(transfer); /* drops sg_ctx reference */
 }
 
-static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg_one(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev,
 		struct mx_transfer *transfer, int opcode, bool nowait)
 {
 	size_t size = transfer->size;
 	ssize_t ret;
 
-	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
+	ret = mx_transfer_init_sg(ctx, mx_pdev, transfer, opcode);
 	if (ret < 0) {
 		mx_transfer_destroy_sg(mx_pdev, transfer);
 		return ret;
@@ -615,14 +628,15 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 			transfer->dir, transfer->size, true, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
-		schedule_work(&transfer->work);
+		mx_transfer_schedule_wait(mx_pdev, transfer);
 		return size;
 	}
 
 	return mx_transfer_wait(mx_pdev, transfer);
 }
 
-static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg_parallel(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev,
 		struct mx_transfer **transfers, int opcode, int count, bool nowait)
 {
 	ssize_t transferred = 0;
@@ -632,7 +646,7 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 	int i;
 
 	for (i = 0; i < count; i++) {
-		ret = mx_transfer_init_sg(mx_pdev, transfers[i], opcode);
+		ret = mx_transfer_init_sg(ctx, mx_pdev, transfers[i], opcode);
 		if (ret < 0)
 			break;
 		total_size += transfers[i]->size;
@@ -657,7 +671,7 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 
 	if (nowait) {
 		for (i = 0; i < count; i++)
-			schedule_work(&transfers[i]->work);
+			mx_transfer_schedule_wait(mx_pdev, transfers[i]);
 		kfree(transfers);
 		return total_size;
 	}
@@ -680,7 +694,8 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
  * buffer in a shared sg_context so single and parallel paths share the same
  * destroy / zombie semantics.
  */
-static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg_split(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev,
 		void __user *buf, size_t size, uint64_t device_addr,
 		enum dma_data_direction dir, int opcode, int count, bool nowait)
 {
@@ -701,7 +716,7 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
 			pr_warn("Failed to alloc mx_transfer\n");
 			return -ENOMEM;
 		}
-		return mx_transfer_submit_sg_one(mx_pdev, transfer, opcode, nowait);
+		return mx_transfer_submit_sg_one(ctx, mx_pdev, transfer, opcode, nowait);
 	}
 
 	transfers = alloc_mx_transfers(sg_ctx, device_addr, count);
@@ -711,12 +726,17 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
+	ret = mx_transfer_submit_sg_parallel(ctx, mx_pdev, transfers, opcode, count, nowait);
 	return ret;
 }
 
-static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
+static int mx_transfer_init_ctrl(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
+	int ret = mx_lease_transfer_get(ctx, transfer);
+
+	if (ret)
+		return ret;
 	transfer->command = mx_pdev->ops.create_command_ctrl(transfer, opcode);
 	if (!transfer->command)
 		return -ENOMEM;
@@ -748,13 +768,14 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 	return ret;
 }
 
-static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_ctrl(struct mx_file_ctx *ctx,
+		struct mx_pci_dev *mx_pdev,
 		struct mx_transfer *transfer, int opcode, bool nowait)
 {
 	size_t size = transfer->size;
 	ssize_t ret;
 
-	ret = mx_transfer_init_ctrl(mx_pdev, transfer, opcode);
+	ret = mx_transfer_init_ctrl(ctx, mx_pdev, transfer, opcode);
 	if (ret < 0) {
 		release_mx_transfer(transfer);
 		return ret;
@@ -764,7 +785,7 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 			transfer->dir, transfer->size, false, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
-		schedule_work(&transfer->work);
+		mx_transfer_schedule_wait(mx_pdev, transfer);
 		return size;
 	}
 
@@ -823,41 +844,48 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 	return max_t(int, count, 1);
 }
 
-ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
+ssize_t read_data_from_device(struct mx_file_ctx *ctx,
 		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
-	return mx_transfer_submit_sg_split(mx_pdev, user_addr, size, *fpos,
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
+
+	return mx_transfer_submit_sg_split(ctx, mx_pdev, user_addr, size, *fpos,
 			DMA_FROM_DEVICE, opcode, 1, false);
 }
 
-ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
+ssize_t write_data_to_device(struct mx_file_ctx *ctx,
 		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
-	return mx_transfer_submit_sg_split(mx_pdev, (void __user *)user_addr, size, *fpos,
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
+
+	return mx_transfer_submit_sg_split(ctx, mx_pdev, (void __user *)user_addr, size, *fpos,
 			DMA_TO_DEVICE, opcode, 1, nowait);
 }
 
-ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
+ssize_t read_data_from_device_parallel(struct mx_file_ctx *ctx,
 		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	int count = mx_parallel_count_for(mx_pdev, buf, size);
 
-	return mx_transfer_submit_sg_split(mx_pdev, buf, size, *fpos,
+	return mx_transfer_submit_sg_split(ctx, mx_pdev, buf, size, *fpos,
 			DMA_FROM_DEVICE, opcode, count, false);
 }
 
-ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
+ssize_t write_data_to_device_parallel(struct mx_file_ctx *ctx,
 		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	int count = mx_parallel_count_for(mx_pdev, (void __user *)buf, size);
 
-	return mx_transfer_submit_sg_split(mx_pdev, (void __user *)buf, size, *fpos,
+	return mx_transfer_submit_sg_split(ctx, mx_pdev, (void __user *)buf, size, *fpos,
 			DMA_TO_DEVICE, opcode, count, nowait);
 }
 
-ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
+ssize_t read_ctrl_from_device(struct mx_file_ctx *ctx,
 		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	struct mx_transfer *transfer;
 
 	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
@@ -866,12 +894,13 @@ ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
 		return -ENOMEM;
 	}
 
-	return mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, false);
+	return mx_transfer_submit_ctrl(ctx, mx_pdev, transfer, opcode, false);
 }
 
-ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
+ssize_t write_ctrl_to_device(struct mx_file_ctx *ctx,
 		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	struct mx_transfer *transfer;
 
 	transfer = alloc_mx_transfer((void __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
@@ -880,31 +909,34 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 		return -ENOMEM;
 	}
 
-	return mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, nowait);
+	return mx_transfer_submit_ctrl(ctx, mx_pdev, transfer, opcode, nowait);
 }
 
 /******************************************************************************/
 /* Protocol transfer (HIO Send/Recv)                                          */
 /******************************************************************************/
-ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode)
+ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf,
+		size_t size, int opcode)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	/*
 	 * HIO Send/Recv both perform H2D and D2H on the same host buffer:
 	 *   Send: H2D(full buffer) -> firmware -> D2H(status in command page)
 	 *   Recv: H2D(command page) -> firmware -> D2H(response in full buffer)
 	 * DMA_BIDIRECTIONAL is required.  Treated as a single transfer (no split).
 	 */
-	return mx_transfer_submit_sg_split(mx_pdev, buf, size, 0,
+	return mx_transfer_submit_sg_split(ctx, mx_pdev, buf, size, 0,
 			DMA_BIDIRECTIONAL, opcode, 1, false);
 }
 
 /******************************************************************************/
 /* Passthrough command                                                        */
 /******************************************************************************/
-long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
+long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 			     uint64_t device_addr, uint64_t size, bool no_completion,
 			     uint8_t *out_status, uint64_t *out_host_addr)
 {
+	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	struct mx_transfer *transfer;
 	long left_time;
 
@@ -914,6 +946,14 @@ long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
 	transfer = alloc_mx_transfer(NULL, size, device_addr, DMA_NONE);
 	if (!transfer)
 		return -ENOMEM;
+	{
+		int ret = mx_lease_transfer_get(ctx, transfer);
+
+		if (ret) {
+			release_mx_transfer(transfer);
+			return ret;
+		}
+	}
 
 	transfer->command = mx_pdev->ops.create_command_passthru(transfer, subopcode);
 	if (!transfer->command) {
@@ -1030,8 +1070,6 @@ int zombie_cleanup_handler(void *data)
 	LIST_HEAD(to_cleanup);
 
 	while (!kthread_should_stop()) {
-		unsigned long grace = msecs_to_jiffies(zombie_grace_ms);
-
 		msleep_interruptible(1000);
 
 		if (kthread_should_stop())
@@ -1042,8 +1080,7 @@ int zombie_cleanup_handler(void *data)
 		list_for_each_entry_safe(transfer, tmp, &mx_pdev->zombie_list, zombie_entry) {
 			bool hw_done = (atomic_read(&transfer->wait_claimed) == 1);
 
-			if (hw_done || time_after(jiffies,
-					transfer->zombie_timestamp + grace)) {
+			if (hw_done) {
 				list_del(&transfer->zombie_entry);
 				list_add_tail(&transfer->zombie_entry, &to_cleanup);
 			}
@@ -1053,7 +1090,11 @@ int zombie_cleanup_handler(void *data)
 		drain_zombie_list(mx_pdev, &to_cleanup);
 	}
 
-	/* Final drain: force-clean all remaining zombies on thread exit */
+	/* Final force-drain is legal only after protocol completion/queue deletion
+	 * or permanent physical disconnect. Clearing PCI Bus Master alone does not
+	 * cancel an internal command that could resume after rebind. */
+	if (!READ_ONCE(mx_pdev->dma_reclaim_safe))
+		return 0;
 	spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
 	list_splice_init(&mx_pdev->zombie_list, &to_cleanup);
 	spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
