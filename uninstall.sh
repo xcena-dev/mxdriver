@@ -40,13 +40,21 @@ if [[ -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     echo "[INFO] Removing xcena_set_devdax_perm..."
     rm -f /usr/local/sbin/xcena_set_devdax_perm
     rm -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
-    udevadm control --reload-rules
+    # Best-effort: udevd is not running during an image build, and what a booted
+    # system reads is the rule file, which is already gone by this point.
+    udevadm control --reload-rules \
+        || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
     echo "[INFO] xcena_set_devdax_perm removal completed."
 fi
 
-# Update initramfs
+# Update initramfs. -u fails without an image to update, which a root being
+# unpacked for an image build has not got for the kernel uname reports.
 if command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u -k "$(uname -r)"
+    if [[ -e "/boot/initrd.img-$(uname -r)" ]]; then
+        update-initramfs -u -k "$(uname -r)"
+    else
+        echo "[INFO] No initrd for $(uname -r) to update, skipping regeneration."
+    fi
 elif command -v dracut >/dev/null 2>&1; then
     dracut --force --kver "$(uname -r)"
 fi
