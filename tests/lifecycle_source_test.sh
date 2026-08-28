@@ -28,6 +28,15 @@ rg -Fq 'mx_pdev->saved_coherent_dma_mask)' init.c
 rg -Fq 'saved_min_align_mask = dma_get_min_align_mask(&pdev->dev)' init.c
 rg -Fq 'required_min_align_mask = mx_pdev->saved_min_align_mask |' init.c
 rg -Fq 'mx_pdev->saved_min_align_mask);' init.c
+dma_set_void_guards=$(rg -U -c \
+    'LINUX_VERSION_CODE >= KERNEL_VERSION\(6, 10, 0\) \|\| \\\n\s*RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION\(9, 6\)' init.c)
+if [ "$dma_set_void_guards" -ne 2 ]; then
+    echo "both dma_set_max_seg_size call sites need the RHEL 9.6 void guard" >&2
+    exit 1
+fi
+rg -q 'static inline int mx_sg_alloc_table' transfer.c
+rg -q 'RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION\(9, 2\)' transfer.c
+rg -q 'ret = mx_sg_alloc_table\(sgt' transfer.c
 rg -q 'MX_LEASE_CAP_PERSISTENT_STATE_ANCHOR' lease.c
 rg -q 'MX_LEASE_CAP_PRIVILEGED_FRESH_ANCHOR' lease.c
 rg -q 'MX_LEASE_CAP_PRIVILEGED_PUBLISHER' lease.c
@@ -49,6 +58,12 @@ rg -q 'ctx->transfer_count' lease.c
 rg -q 'ctx->direct_count' lease.c
 rg -q 'mx_lease_direct_begin\(ctx\)' fops.c
 rg -q 'mx_lease_direct_end\(ctx\)' fops.c
+rg -q 'struct mx_file_ctx \*owner_ctx' mx_dma.h
+bar_mmap_block=$(sed -n '/static int mxdma_bar_mmap_v1/,/return ret;/p' core_v1.c)
+grep -q 'mx_file_ctx_get(ctx)' <<<"$bar_mmap_block"
+grep -q 'bar_vma->owner_ctx = ctx' <<<"$bar_mmap_block"
+bar_close_block=$(sed -n '/static void mx_bar_vma_close/,/^}/p' core_v1.c)
+grep -q 'mx_file_ctx_put(owner_ctx)' <<<"$bar_close_block"
 rg -q 'mx_lease_anchor_slot_domain' lease.c
 rg -q 'file_inode\(slot_file\) != lease->slot_domain_inode' lease.c
 rg -q 'mx_lease_clone_with_ofd_lock\(source, F_RDLCK' lease.c

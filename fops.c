@@ -287,8 +287,8 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 
 	ret = mx_lease_direct_begin(ctx);
 	if (!ret) {
-		ret = mx_pdev->ops.bar_mmap ? mx_pdev->ops.bar_mmap(mx_pdev, vma) :
-			-EOPNOTSUPP;
+		ret = mx_pdev->ops.bar_mmap ?
+			mx_pdev->ops.bar_mmap(mx_pdev, ctx, vma) : -EOPNOTSUPP;
 		mx_lease_direct_end(ctx);
 	}
 	mxdma_device_finish(mx_pdev);

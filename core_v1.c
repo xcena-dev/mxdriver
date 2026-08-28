@@ -431,6 +431,7 @@ static void mx_bar_vma_close(struct vm_area_struct *vma)
 {
 	struct mx_bar_vma *bar_vma = vma->vm_private_data;
 	struct mx_pci_dev *mx_pdev = bar_vma->mx_pdev;
+	struct mx_file_ctx *owner_ctx = bar_vma->owner_ctx;
 	bool last = false;
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
@@ -444,6 +445,7 @@ out_unlock:
 	mutex_unlock(&mx_pdev->bar_mmap_lock);
 	if (last) {
 		kfree(bar_vma);
+		mx_file_ctx_put(owner_ctx);
 		mx_pdev_put(mx_pdev);
 	}
 }
@@ -454,6 +456,7 @@ static const struct vm_operations_struct mx_bar_vm_ops = {
 };
 
 static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
+			     struct mx_file_ctx *ctx,
 			     struct vm_area_struct *vma)
 {
 	struct mx_bar_vma *bar_vma;
@@ -517,9 +520,14 @@ static int mxdma_bar_mmap_v1(struct mx_pci_dev *mx_pdev,
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
 				 vma->vm_page_prot);
 	if (!ret) {
-		/* The VMA may outlive the character-device file. One device reference
-		 * follows the shared bar_vma object across fork and is dropped by the
-		 * last vm_close(). */
+		/* The VMA may outlive the character-device file. Keep its file context
+		 * alive so the lease holder remains visible until the last forked VMA
+		 * closes; otherwise close(fd) would let a sandbox lease coexist with a
+		 * legacy process that can still write the BAR. */
+		mx_file_ctx_get(ctx);
+		bar_vma->owner_ctx = ctx;
+		/* One independent device reference follows the shared bar_vma object
+		 * across fork and is dropped by the last vm_close(). */
 		kref_get(&mx_pdev->refcount);
 		refcount_set(&bar_vma->refs, 1);
 		list_add_tail(&bar_vma->entry, &mx_pdev->bar_mappings);

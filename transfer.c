@@ -82,6 +82,24 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 	return ctx;
 }
 
+/* The segment-capped helper landed in 5.19. Older upstream kernels and
+ * pre-9.2 RHEL trees retain the uncapped API this driver used previously.
+ * Keep max_seg evaluated so mx_max_sg_segment() does not become an unused
+ * static function on the compatibility path.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0) && \
+	RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)
+static inline int mx_sg_alloc_table(struct sg_table *sgt,
+		struct page **pages, unsigned int n, unsigned int off,
+		unsigned long sz, unsigned int max_seg, gfp_t gfp)
+{
+	(void)max_seg;
+	return sg_alloc_table_from_pages(sgt, pages, n, off, sz, gfp);
+}
+#else
+#define mx_sg_alloc_table sg_alloc_table_from_pages_segment
+#endif
+
 /*
  * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
  * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
@@ -184,9 +202,10 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		sgt->sgl = ctx->sg_inline;
 		sgt->orig_nents = pages_nr;
 	} else {
-		ret = sg_alloc_table_from_pages_segment(sgt, ctx->pages, pages_nr, offset, total_size,
-						       mx_max_sg_segment(&mx_pdev->pdev->dev),
-						       GFP_KERNEL);
+		ret = mx_sg_alloc_table(sgt, ctx->pages, pages_nr, offset,
+					total_size,
+					mx_max_sg_segment(&mx_pdev->pdev->dev),
+					GFP_KERNEL);
 		if (ret) {
 			pr_warn("sg_alloc_table_from_pages failed (err=%d)\n", ret);
 			goto err;

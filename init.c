@@ -72,8 +72,9 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 		mx_pdev->min_align_mask_changed = false;
 	}
 	if (mx_pdev->max_seg_size_changed) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-		/* dma_set_max_seg_size() returns void since 6.10. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0) || \
+	RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+		/* dma_set_max_seg_size() returns void since 6.10 and in RHEL 9.6. */
 		dma_set_max_seg_size(&pdev->dev, mx_pdev->saved_max_seg_size);
 #else
 		if (dma_set_max_seg_size(&pdev->dev,
@@ -245,8 +246,9 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 
 	mx_pdev->saved_max_seg_size = dma_get_max_seg_size(&pdev->dev);
 	if (mx_pdev->saved_max_seg_size > SZ_1G) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-		/* dma_set_max_seg_size() returns void since 6.10. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0) || \
+	RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+		/* dma_set_max_seg_size() returns void since 6.10 and in RHEL 9.6. */
 		dma_set_max_seg_size(&pdev->dev, SZ_1G);
 #else
 		int ret = dma_set_max_seg_size(&pdev->dev, SZ_1G);

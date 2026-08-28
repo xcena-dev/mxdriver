@@ -317,6 +317,7 @@ struct mx_file_ctx {
 struct mx_bar_vma {
 	struct list_head entry;
 	struct mx_pci_dev *mx_pdev;
+	struct mx_file_ctx *owner_ctx;
 	struct address_space *mapping;
 	refcount_t refs;
 };
@@ -370,7 +371,8 @@ struct mx_operations {
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
-	int (*bar_mmap) (struct mx_pci_dev *, struct vm_area_struct *);
+	int (*bar_mmap) (struct mx_pci_dev *, struct mx_file_ctx *,
+			 struct vm_area_struct *);
 } __randomize_layout;
 
 struct mx_pci_dev {
