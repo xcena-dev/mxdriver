@@ -25,14 +25,28 @@ SRC_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 # tree and registered under the version, so a mismatch installs a module that
 # cannot load (DKMS), or installs it into a directory depmod never indexes
 # (legacy path) -- both silently.
+#
+# sudo's env_reset drops all three variables, so hand them to sudo rather than to
+# the shell that calls it: `sudo XCENA_TARGET_KVER=... ./install.sh`.
 KVER="${XCENA_TARGET_KVER:-}"
 KDIR="${XCENA_TARGET_KDIR:-}"
 if [[ -n "$KDIR" ]]; then
-    TREE_KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
+    [[ -d "$KDIR" ]] || { echo "[ERROR] kernel build tree not found: ${KDIR}"; exit 1; }
+    # Absolute from here on: dkms cds into its own build tree before running
+    # make -C "$kernel_source_dir", where a relative path resolves elsewhere.
+    KDIR="$(cd "$KDIR" && pwd)"
+    # A header tree's kernelrelease target recomputes the version from the
+    # Makefile and loses the distro suffix (6.8.0-117-generic reads back as
+    # 6.8.12); include/config/kernel.release holds what the tree really builds.
+    TREE_KVER="$(cat "$KDIR/include/config/kernel.release" 2>/dev/null || true)"
+    [[ -n "$TREE_KVER" ]] || TREE_KVER="$(make -s -C "$KDIR" kernelrelease 2>/dev/null || true)"
     if [[ -z "$KVER" ]]; then
         KVER="$TREE_KVER"
-        [[ -n "$KVER" ]] || { echo "[ERROR] cannot read kernelrelease from '${KDIR}'"; exit 1; }
-    elif [[ -n "$TREE_KVER" && "$TREE_KVER" != "$KVER" ]]; then
+        [[ -n "$KVER" ]] || { echo "[ERROR] cannot read the kernel release from '${KDIR}'"; exit 1; }
+    elif [[ -z "$TREE_KVER" ]]; then
+        echo "[WARN] cannot read the kernel release from '${KDIR}';"
+        echo "       XCENA_TARGET_KVER='${KVER}' goes unchecked against that tree."
+    elif [[ "$TREE_KVER" != "$KVER" ]]; then
         echo "[ERROR] XCENA_TARGET_KVER='${KVER}' disagrees with the tree at '${KDIR}'"
         echo "        (that tree builds '${TREE_KVER}'). Give one of them, or matching values."
         exit 1
@@ -40,7 +54,7 @@ if [[ -n "$KDIR" ]]; then
 fi
 [[ -n "$KVER" ]] || KVER="$(uname -r)"
 [[ -n "$KDIR" ]] || KDIR="/lib/modules/${KVER}/build"
-if [[ ! -e "$KDIR" ]]; then
+if [[ ! -d "$KDIR" ]]; then
     echo "[ERROR] kernel build tree not found: ${KDIR}"
     echo "        install linux-headers-${KVER}, or set XCENA_TARGET_KDIR to the tree."
     exit 1
@@ -161,8 +175,8 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
     rm -f /usr/local/sbin/xcena_set_devdax_perm
     # Best-effort: udevd is not running during an image build, and what a booted
     # system reads is the rule file, which is already gone by this point.
-    udevadm control --reload-rules 2>/dev/null \
-        || echo "[INFO] udevd not running; rule change applies at boot."
+    udevadm control --reload-rules \
+        || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
@@ -198,9 +212,17 @@ fi
 
 # Regenerate initramfs once at the end so it picks up softdep ordering and,
 # where configured, the bundled mx_dma module.
+#
+# -u updates an image that already exists and fails without one, which a target
+# kernel staged into an image has not got. dracut creates one either way, so
+# only the initramfs-tools path needs the image to be there first.
 if [[ "$INITRAMFS_BACKEND" == "initramfs-tools" ]]; then
-    echo "[INFO] Updating initramfs..."
-    update-initramfs -u -k "${KVER}"
+    if [[ -e "/boot/initrd.img-${KVER}" ]]; then
+        echo "[INFO] Updating initramfs..."
+        update-initramfs -u -k "${KVER}"
+    else
+        echo "[INFO] No initrd for ${KVER} to update, skipping regeneration."
+    fi
 elif [[ "$INITRAMFS_BACKEND" == "dracut" ]]; then
     echo "[INFO] Updating initramfs via dracut..."
     dracut --force --kver "${KVER}"
