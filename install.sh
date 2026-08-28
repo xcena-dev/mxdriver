@@ -180,8 +180,8 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
     rm -f /usr/local/sbin/xcena_set_devdax_perm
     # Best-effort: udevd is not running during an image build, and what a booted
     # system reads is the rule file, which is already gone by this point.
-    udevadm control --reload-rules 2>/dev/null \
-        || echo "[INFO] udevd not running; rule change applies at boot."
+    udevadm control --reload-rules \
+        || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
@@ -218,13 +218,17 @@ fi
 # Regenerate initramfs once at the end so it picks up softdep ordering and,
 # where configured, the bundled mx_dma module.
 #
-# Non-fatal, as in scripts/dkms-post-install.sh: -u needs an initrd to already
-# exist for that kernel, which a target kernel being staged into an image has
-# not got, and the module is installed either way.
+# -u updates an image that already exists and fails without one, which a target
+# kernel staged into an image has not got. dracut creates one either way, so
+# only the initramfs-tools path needs the image to be there first.
 if [[ "$INITRAMFS_BACKEND" == "initramfs-tools" ]]; then
-    echo "[INFO] Updating initramfs..."
-    update-initramfs -u -k "${KVER}" || echo "[WARN] initramfs update failed (non-fatal)"
+    if [[ -e "/boot/initrd.img-${KVER}" ]]; then
+        echo "[INFO] Updating initramfs..."
+        update-initramfs -u -k "${KVER}"
+    else
+        echo "[INFO] No initrd for ${KVER} to update, skipping regeneration."
+    fi
 elif [[ "$INITRAMFS_BACKEND" == "dracut" ]]; then
     echo "[INFO] Updating initramfs via dracut..."
-    dracut --force --kver "${KVER}" || echo "[WARN] initramfs update failed (non-fatal)"
+    dracut --force --kver "${KVER}"
 fi
