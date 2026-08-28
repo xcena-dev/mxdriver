@@ -398,9 +398,15 @@ struct mx_pci_dev {
 	bool pci_enabled_by_driver;
 	bool bus_master_enabled_by_driver;
 	bool readrq_changed;
+	bool dma_mask_changed;
+	bool coherent_dma_mask_changed;
 	bool max_seg_size_changed;
+	bool min_align_mask_changed;
 	int saved_readrq;
+	u64 saved_dma_mask;
+	u64 saved_coherent_dma_mask;
 	unsigned int saved_max_seg_size;
+	unsigned int saved_min_align_mask;
 	int attach_error;
 
 	/* Per-device liveness watchdog config, exposed under the liveness/ sysfs

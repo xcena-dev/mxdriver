@@ -64,6 +64,13 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 			dev_warn(&pdev->dev, "failed to restore PCIe read request size\n");
 		mx_pdev->readrq_changed = false;
 	}
+	if (mx_pdev->min_align_mask_changed) {
+		/* Ignore the pre-6.12 return value as in the setup path: a bound
+		 * PCI device has dma_parms, and the helper is void on newer kernels. */
+		dma_set_min_align_mask(&pdev->dev,
+				       mx_pdev->saved_min_align_mask);
+		mx_pdev->min_align_mask_changed = false;
+	}
 	if (mx_pdev->max_seg_size_changed) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
 		/* dma_set_max_seg_size() returns void since 6.10. */
@@ -74,6 +81,18 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 			dev_warn(&pdev->dev, "failed to restore DMA max segment size\n");
 #endif
 		mx_pdev->max_seg_size_changed = false;
+	}
+	if (mx_pdev->coherent_dma_mask_changed) {
+		if (dma_set_coherent_mask(&pdev->dev,
+					  mx_pdev->saved_coherent_dma_mask))
+			dev_warn(&pdev->dev,
+				 "failed to restore coherent DMA mask\n");
+		mx_pdev->coherent_dma_mask_changed = false;
+	}
+	if (mx_pdev->dma_mask_changed) {
+		if (dma_set_mask(&pdev->dev, mx_pdev->saved_dma_mask))
+			dev_warn(&pdev->dev, "failed to restore streaming DMA mask\n");
+		mx_pdev->dma_mask_changed = false;
 	}
 	if (mx_pdev->bus_master_enabled_by_driver) {
 		pci_clear_master(pdev);
@@ -199,11 +218,31 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 	struct pci_dev *pdev = mx_pdev->pdev;
 
 #ifndef CONFIG_WO_CXL
+	u64 selected_dma_mask;
+	unsigned int required_min_align_mask;
+
 	/* The CXL driver owns dev->dma_mask and DMA parameters. Its configured
-	 * mask is also honored by our explicit dma_alloc/map calls; never rewrite
-	 * foreign driver DMA state from the notifier overlay. */
+	 * mask is also honored by our explicit dma_alloc/map calls. Preserve and
+	 * restore every foreign DMA parameter that this notifier overlay must
+	 * tighten for the MX PRP format. */
 	if (!pdev->dev.dma_mask || !*pdev->dev.dma_mask)
 		return -EINVAL;
+	mx_pdev->saved_dma_mask = *pdev->dev.dma_mask;
+	mx_pdev->saved_coherent_dma_mask = pdev->dev.coherent_dma_mask;
+	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(48))) {
+		selected_dma_mask = DMA_BIT_MASK(48);
+	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
+		selected_dma_mask = DMA_BIT_MASK(32);
+	} else {
+		return -EINVAL;
+	}
+	mx_pdev->dma_mask_changed =
+		selected_dma_mask != mx_pdev->saved_dma_mask;
+	if (dma_set_coherent_mask(&pdev->dev, selected_dma_mask))
+		return -EINVAL;
+	mx_pdev->coherent_dma_mask_changed =
+		selected_dma_mask != mx_pdev->saved_coherent_dma_mask;
+
 	mx_pdev->saved_max_seg_size = dma_get_max_seg_size(&pdev->dev);
 	if (mx_pdev->saved_max_seg_size > SZ_1G) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
@@ -216,6 +255,19 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 			return ret;
 #endif
 		mx_pdev->max_seg_size_changed = true;
+	}
+
+	/* PRP entries carry addresses but no lengths. Preserve intra-page offsets
+	 * when the DMA API uses bounce buffers so all non-final SG entries remain
+	 * page-boundary expressible, matching the standalone path below. */
+	mx_pdev->saved_min_align_mask = dma_get_min_align_mask(&pdev->dev);
+	required_min_align_mask = mx_pdev->saved_min_align_mask |
+				  (PAGE_SIZE - 1);
+	if (required_min_align_mask != mx_pdev->saved_min_align_mask) {
+		/* The helper returns void from 6.12 onward. A bound PCI device has
+		 * dma_parms, so the older return value cannot report failure here. */
+		dma_set_min_align_mask(&pdev->dev, required_min_align_mask);
+		mx_pdev->min_align_mask_changed = true;
 	}
 	return 0;
 #else

@@ -21,6 +21,13 @@ rg -q 'try_module_get\(THIS_MODULE\)' init.c
 rg -q 'mxdma_enumerate_bound_devices' init.c
 rg -q 'device_lock\(&pdev->dev\)' init.c
 rg -q 'strcmp\(pdev->dev.driver->name, "cxl_pci"\)' init.c
+rg -Fq 'saved_dma_mask = *pdev->dev.dma_mask' init.c
+rg -Fq 'saved_coherent_dma_mask = pdev->dev.coherent_dma_mask' init.c
+rg -Fq 'dma_set_mask(&pdev->dev, mx_pdev->saved_dma_mask)' init.c
+rg -Fq 'mx_pdev->saved_coherent_dma_mask)' init.c
+rg -Fq 'saved_min_align_mask = dma_get_min_align_mask(&pdev->dev)' init.c
+rg -Fq 'required_min_align_mask = mx_pdev->saved_min_align_mask |' init.c
+rg -Fq 'mx_pdev->saved_min_align_mask);' init.c
 rg -q 'MX_LEASE_CAP_PERSISTENT_STATE_ANCHOR' lease.c
 rg -q 'MX_LEASE_CAP_PRIVILEGED_FRESH_ANCHOR' lease.c
 rg -q 'MX_LEASE_CAP_PRIVILEGED_PUBLISHER' lease.c
