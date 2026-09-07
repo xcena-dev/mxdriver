@@ -114,8 +114,8 @@ User read/write → fops.c (magic validation)
 ### CXL vs Standalone Mode
 
 Controlled by `CONFIG_WO_CXL` (set via `make WO_CXL=1`):
-- **CXL mode** (default): Uses PCI bus notifier to detect CXL-bound devices. Device ID derived from CXL memory device name (`mem{N}`). Global device list tracks all probed devices.
-- **Standalone mode** (`WO_CXL=1`): Uses standard `pci_register_driver`. Device IDs are auto-incremented.
+- **CXL mode** (default): Uses PCI bus notifier to detect CXL-bound devices. Device ID derived from CXL memory device name (`mem{N}`). The bound driver is `cxl_pci`, so the device's `driver_data` belongs to it and the driver must never write there; the global device list (`mx_device_node`) is what maps a `struct pci_dev` back to its `mx_pci_dev`.
+- **Standalone mode** (`WO_CXL=1`): Uses standard `pci_register_driver`. The driver is the bound one, so `pci_set_drvdata`/`pci_get_drvdata` hold that mapping and no list is kept. Device IDs are auto-incremented.
 
 ### IOCTL Interface
 

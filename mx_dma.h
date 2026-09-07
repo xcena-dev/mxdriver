@@ -172,8 +172,11 @@ typedef union {
 } mbox_context_t;
 
 #ifndef CONFIG_WO_CXL
+/* One registry entry per XCENA PCI device we have attached to.  In CXL mode the
+ * bound driver is cxl_pci, so this list -- not the device's driver_data -- is
+ * what maps a struct pci_dev back to our per-device state. */
 struct mx_device_node {
-	struct device *dev;
+	struct mx_pci_dev *mx_pdev;
 	struct list_head node;
 };
 #endif

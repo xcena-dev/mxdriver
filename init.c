@@ -9,6 +9,9 @@ static struct class *mxdma_class;
 struct kmem_cache *mx_transfer_cache;
 
 #ifndef CONFIG_WO_CXL
+/* In CXL mode cxl_pci is the driver bound to the device, so its driver_data
+ * field belongs to cxl_pci.  We ride the PCI bus notifier instead of binding,
+ * and keep our own pci_dev -> mx_pci_dev registry here. */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
 #endif
@@ -375,40 +378,23 @@ static void destroy_mx_cdev(struct mx_char_dev *mx_cdev)
 	cdev_del(&mx_cdev->cdev);
 }
 
-static void mxdma_device_online(struct pci_dev *pdev)
+static void mxdma_device_online(struct mx_pci_dev *mx_pdev)
 {
-	struct mx_pci_dev *mx_pdev;
-
-	mx_pdev = dev_get_drvdata(&pdev->dev);
-	if (!mx_pdev)
-		return;
-
 	mx_pdev->enabled = true;
 }
 
-static void mxdma_device_offline(struct pci_dev *pdev)
+static void mxdma_device_offline(struct mx_pci_dev *mx_pdev)
 {
-	struct mx_pci_dev *mx_pdev;
-
-	mx_pdev = dev_get_drvdata(&pdev->dev);
-	if (!mx_pdev)
-		return;
-
 	mutex_lock(&mx_pdev->bar_mmap_lock);
 	mx_pdev->enabled = false;
 	mutex_unlock(&mx_pdev->bar_mmap_lock);
 }
 
-static void destroy_mx_pdev(struct pci_dev *pdev)
+static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 {
-	struct mx_pci_dev *mx_pdev;
 	int type;
 
-	mxdma_device_offline(pdev);
-
-	mx_pdev = dev_get_drvdata(&pdev->dev);
-	if (!mx_pdev)
-		return;
+	mxdma_device_offline(mx_pdev);
 
 	mutex_lock(&mx_pdev->bar_mmap_lock);
 	if (mx_pdev->mmap_mapping) {
@@ -435,10 +421,10 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	dev_unmap(mx_pdev);
 	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
 	pci_device_exit(mx_pdev);
-	dev_set_drvdata(&pdev->dev, NULL);
 }
 
-static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
+static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
+			  struct mx_pci_dev **mx_pdev_out)
 {
 	struct mx_pci_dev *mx_pdev;
 	int type;
@@ -449,8 +435,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		pr_err("Failed to alloc mx_pci_dev\n");
 		return -ENOMEM;
 	}
-
-	dev_set_drvdata(&pdev->dev, mx_pdev);
 
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
@@ -538,12 +522,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		goto out_fail;
 	}
 
-	mxdma_device_online(pdev);
+	mxdma_device_online(mx_pdev);
+
+	*mx_pdev_out = mx_pdev;
 
 	return 0;
 
 out_fail:
-	destroy_mx_pdev(pdev);
+	destroy_mx_pdev(mx_pdev);
 
 	return ret;
 }
@@ -598,15 +584,26 @@ static int get_cxl_memdev_id(struct pci_dev *pdev)
 #endif
 }
 
+/*
+ * Where a probed device's mx_pci_dev is recorded, and how it is found again.
+ *
+ * Standalone mode binds mx_dma to the device as a PCI driver, so driver_data is
+ * ours and holds the pointer directly.  CXL mode has cxl_pci bound instead: its
+ * mailbox path reads that same field back as a struct cxl_dev_state, so writing
+ * ours there makes cxl_pci read our layout at its own offsets -- a NULL register
+ * base and a kernel fault on the next Get Health Info command.  CXL mode
+ * therefore leaves driver_data untouched and keeps the pointer in a list of its
+ * own, keyed by the struct pci_dev.
+ */
 #ifndef CONFIG_WO_CXL
-static int add_device_into_global_list(struct pci_dev *pdev)
+static int mx_pdev_register(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_device_node *mx_node;
 
-	mx_node = devm_kzalloc(&pdev->dev, sizeof(*mx_node), GFP_KERNEL);
+	mx_node = kzalloc(sizeof(*mx_node), GFP_KERNEL);
 	if (!mx_node)
 		return -ENOMEM;
-	mx_node->dev = &pdev->dev;
+	mx_node->mx_pdev = mx_pdev;
 
 	mutex_lock(&mx_device_list_lock);
 	list_add_tail(&mx_node->node, &mx_device_list_head);
@@ -614,10 +611,59 @@ static int add_device_into_global_list(struct pci_dev *pdev)
 
 	return 0;
 }
+
+static void mx_pdev_unregister(struct mx_pci_dev *mx_pdev)
+{
+	struct mx_device_node *mx_node, *tmp;
+
+	mutex_lock(&mx_device_list_lock);
+	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
+		if (mx_node->mx_pdev == mx_pdev) {
+			list_del(&mx_node->node);
+			kfree(mx_node);
+			break;
+		}
+	}
+	mutex_unlock(&mx_device_list_lock);
+}
+
+static struct mx_pci_dev *mx_pdev_lookup(struct pci_dev *pdev)
+{
+	struct mx_device_node *mx_node;
+	struct mx_pci_dev *mx_pdev = NULL;
+
+	mutex_lock(&mx_device_list_lock);
+	list_for_each_entry(mx_node, &mx_device_list_head, node) {
+		if (mx_node->mx_pdev->pdev == pdev) {
+			mx_pdev = mx_node->mx_pdev;
+			break;
+		}
+	}
+	mutex_unlock(&mx_device_list_lock);
+
+	return mx_pdev;
+}
+#else
+static int mx_pdev_register(struct mx_pci_dev *mx_pdev)
+{
+	pci_set_drvdata(mx_pdev->pdev, mx_pdev);
+	return 0;
+}
+
+static void mx_pdev_unregister(struct mx_pci_dev *mx_pdev)
+{
+	pci_set_drvdata(mx_pdev->pdev, NULL);
+}
+
+static struct mx_pci_dev *mx_pdev_lookup(struct pci_dev *pdev)
+{
+	return pci_get_drvdata(pdev);
+}
 #endif
 
 static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
+	struct mx_pci_dev *mx_pdev;
 	int ret;
 	int cxl_memdev_id;
 
@@ -628,20 +674,18 @@ static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id
 		return -ENODEV;
 	}
 
-	ret = create_mx_pdev(pdev, cxl_memdev_id);
+	ret = create_mx_pdev(pdev, cxl_memdev_id, &mx_pdev);
 	if (ret) {
 		pr_err("Failed to create_mx_pdev\n");
 		return ret;
 	}
 
-#ifndef CONFIG_WO_CXL
-	ret = add_device_into_global_list(pdev);
-	if (ret < 0)
-	{
-		destroy_mx_pdev(pdev);
+	ret = mx_pdev_register(mx_pdev);
+	if (ret) {
+		pr_err("Failed to register mx_pci_dev (err=%d)\n", ret);
+		destroy_mx_pdev(mx_pdev);
 		return ret;
 	}
-#endif
 
 	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
 			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
@@ -651,7 +695,15 @@ static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id
 
 static void __mxdma_driver_remove(struct pci_dev *pdev)
 {
-	destroy_mx_pdev(pdev);
+	struct mx_pci_dev *mx_pdev;
+
+	/* A device whose probe failed was never registered; nothing to tear down. */
+	mx_pdev = mx_pdev_lookup(pdev);
+	if (!mx_pdev)
+		return;
+
+	mx_pdev_unregister(mx_pdev);
+	destroy_mx_pdev(mx_pdev);
 
 	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
 			pdev->vendor, pdev->device, dev_name(&pdev->dev));
@@ -678,20 +730,6 @@ static char *mxdma_devnode(const struct device *dev, umode_t *mode)
 }
 
 #ifndef CONFIG_WO_CXL
-static void remove_device_from_global_list(struct device *dev)
-{
-	struct mx_device_node *mx_node, *tmp;
-
-	mutex_lock(&mx_device_list_lock);
-	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
-		if (mx_node->dev == dev) {
-			list_del(&mx_node->node);
-			break;
-		}
-	}
-	mutex_unlock(&mx_device_list_lock);
-}
-
 static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, void *data)
 {
 	struct pci_dev *pdev;
@@ -706,7 +744,6 @@ static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, voi
 		break;
 	case BUS_NOTIFY_UNBIND_DRIVER:
 		__mxdma_driver_remove(pdev);
-		remove_device_from_global_list(&pdev->dev);
 		break;
 	default:
 		break;
@@ -772,22 +809,35 @@ static int mxdma_init(void)
 }
 
 #ifndef CONFIG_WO_CXL
+/* Drains the registry at module exit.  Each entry is unlinked under the lock and
+ * torn down outside it, because destroy_mx_pdev() sleeps.  The bus notifier is
+ * already unregistered by the time we get here, so no new entry can appear. */
 static void destroy_device_list(void)
 {
-	struct mx_device_node *mx_node, *tmp;
-
-	mutex_lock(&mx_device_list_lock);
-	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
+	for (;;) {
+		struct mx_device_node *mx_node;
+		struct mx_pci_dev *mx_pdev;
 		struct pci_dev *pdev;
 
-		if (!mx_node->dev)
-			continue;
+		mutex_lock(&mx_device_list_lock);
+		mx_node = list_first_entry_or_null(&mx_device_list_head,
+						   struct mx_device_node, node);
+		if (mx_node)
+			list_del(&mx_node->node);
+		mutex_unlock(&mx_device_list_lock);
 
-		pdev = to_pci_dev(mx_node->dev);
-		__mxdma_driver_remove(pdev);
-		list_del(&mx_node->node);
+		if (!mx_node)
+			break;
+
+		mx_pdev = mx_node->mx_pdev;
+		pdev = mx_pdev->pdev;
+		kfree(mx_node);
+
+		destroy_mx_pdev(mx_pdev);
+
+		pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
+				pdev->vendor, pdev->device, dev_name(&pdev->dev));
 	}
-	mutex_unlock(&mx_device_list_lock);
 }
 #endif
 
