@@ -9,9 +9,19 @@ static struct class *mxdma_class;
 struct kmem_cache *mx_transfer_cache;
 
 #ifndef CONFIG_WO_CXL
-/* In CXL mode cxl_pci is the driver bound to the device, so its driver_data
+/*
+ * In CXL mode cxl_pci is the driver bound to the device, so its driver_data
  * field belongs to cxl_pci.  We ride the PCI bus notifier instead of binding,
- * and keep our own pci_dev -> mx_pci_dev registry here. */
+ * and keep our own pci_dev -> mx_pci_dev registry here.
+ *
+ * The registry nodes are ours (kzalloc/kfree), but mx_pci_dev itself and the
+ * queues and mailboxes hanging off it still come from devm_* on that foreign
+ * device, so their lifetime ends at cxl_pci's devres teardown.  That is safe
+ * only because the driver core hands us BUS_NOTIFY_UNBIND_DRIVER before it
+ * releases devres, i.e. our teardown always runs first.  Anything added here
+ * must keep that ordering in mind until the allocations move to our own
+ * lifetime.
+ */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
 #endif
@@ -430,6 +440,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	int type;
 	int ret;
 
+	*mx_pdev_out = NULL;
+
 	mx_pdev = devm_kzalloc(&pdev->dev, sizeof(struct mx_pci_dev), GFP_KERNEL);
 	if (!mx_pdev) {
 		pr_err("Failed to alloc mx_pci_dev\n");
@@ -612,22 +624,10 @@ static int mx_pdev_register(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-static void mx_pdev_unregister(struct mx_pci_dev *mx_pdev)
-{
-	struct mx_device_node *mx_node, *tmp;
-
-	mutex_lock(&mx_device_list_lock);
-	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
-		if (mx_node->mx_pdev == mx_pdev) {
-			list_del(&mx_node->node);
-			kfree(mx_node);
-			break;
-		}
-	}
-	mutex_unlock(&mx_device_list_lock);
-}
-
-static struct mx_pci_dev *mx_pdev_lookup(struct pci_dev *pdev)
+/* Unregisters the device and hands its state back to be torn down, or returns
+ * NULL when we hold none for it.  Unlinking and handing back happen in one lock
+ * section, so two callers racing on the same device cannot both take it. */
+static struct mx_pci_dev *mx_pdev_unregister(struct pci_dev *pdev)
 {
 	struct mx_device_node *mx_node;
 	struct mx_pci_dev *mx_pdev = NULL;
@@ -636,8 +636,31 @@ static struct mx_pci_dev *mx_pdev_lookup(struct pci_dev *pdev)
 	list_for_each_entry(mx_node, &mx_device_list_head, node) {
 		if (mx_node->mx_pdev->pdev == pdev) {
 			mx_pdev = mx_node->mx_pdev;
+			list_del(&mx_node->node);
+			kfree(mx_node);
 			break;
 		}
+	}
+	mutex_unlock(&mx_device_list_lock);
+
+	return mx_pdev;
+}
+
+/* Same, for whichever device is still registered.  Lets module exit drain the
+ * registry through the one teardown path without holding an iterator across a
+ * teardown that sleeps. */
+static struct mx_pci_dev *mx_pdev_unregister_any(void)
+{
+	struct mx_device_node *mx_node;
+	struct mx_pci_dev *mx_pdev = NULL;
+
+	mutex_lock(&mx_device_list_lock);
+	mx_node = list_first_entry_or_null(&mx_device_list_head,
+					   struct mx_device_node, node);
+	if (mx_node) {
+		mx_pdev = mx_node->mx_pdev;
+		list_del(&mx_node->node);
+		kfree(mx_node);
 	}
 	mutex_unlock(&mx_device_list_lock);
 
@@ -650,16 +673,29 @@ static int mx_pdev_register(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-static void mx_pdev_unregister(struct mx_pci_dev *mx_pdev)
+static struct mx_pci_dev *mx_pdev_unregister(struct pci_dev *pdev)
 {
-	pci_set_drvdata(mx_pdev->pdev, NULL);
-}
+	struct mx_pci_dev *mx_pdev = pci_get_drvdata(pdev);
 
-static struct mx_pci_dev *mx_pdev_lookup(struct pci_dev *pdev)
-{
-	return pci_get_drvdata(pdev);
+	if (mx_pdev)
+		pci_set_drvdata(pdev, NULL);
+
+	return mx_pdev;
 }
 #endif
+
+/* Tears one device down and reports it gone.  The single teardown path: the
+ * unbind notification, pci_driver::remove, and the module-exit drain all reach
+ * the device through here, after it has left the registry. */
+static void remove_mx_pdev(struct mx_pci_dev *mx_pdev)
+{
+	struct pci_dev *pdev = mx_pdev->pdev;
+
+	destroy_mx_pdev(mx_pdev);
+
+	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
+			pdev->vendor, pdev->device, dev_name(&pdev->dev));
+}
 
 static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -697,16 +733,14 @@ static void __mxdma_driver_remove(struct pci_dev *pdev)
 {
 	struct mx_pci_dev *mx_pdev;
 
-	/* A device whose probe failed was never registered; nothing to tear down. */
-	mx_pdev = mx_pdev_lookup(pdev);
+	/* We hold no state for this device: its probe failed, or -- in CXL mode,
+	 * where we only attach on the bind notification -- it was already bound
+	 * before this module loaded, so we never attached to it at all. */
+	mx_pdev = mx_pdev_unregister(pdev);
 	if (!mx_pdev)
 		return;
 
-	mx_pdev_unregister(mx_pdev);
-	destroy_mx_pdev(mx_pdev);
-
-	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
-			pdev->vendor, pdev->device, dev_name(&pdev->dev));
+	remove_mx_pdev(mx_pdev);
 }
 
 #ifdef CONFIG_WO_CXL
@@ -809,35 +843,17 @@ static int mxdma_init(void)
 }
 
 #ifndef CONFIG_WO_CXL
-/* Drains the registry at module exit.  Each entry is unlinked under the lock and
- * torn down outside it, because destroy_mx_pdev() sleeps.  The bus notifier is
- * already unregistered by the time we get here, so no new entry can appear. */
+/* Drains the registry at module exit.  Each device leaves the registry under the
+ * lock and is torn down outside it, because the teardown sleeps.  bus_unregister_
+ * notifier() has already returned by the time we get here, and it waits out any
+ * in-flight chain call, so neither a new entry nor a concurrent teardown of one
+ * of these devices is possible. */
 static void destroy_device_list(void)
 {
-	for (;;) {
-		struct mx_device_node *mx_node;
-		struct mx_pci_dev *mx_pdev;
-		struct pci_dev *pdev;
+	struct mx_pci_dev *mx_pdev;
 
-		mutex_lock(&mx_device_list_lock);
-		mx_node = list_first_entry_or_null(&mx_device_list_head,
-						   struct mx_device_node, node);
-		if (mx_node)
-			list_del(&mx_node->node);
-		mutex_unlock(&mx_device_list_lock);
-
-		if (!mx_node)
-			break;
-
-		mx_pdev = mx_node->mx_pdev;
-		pdev = mx_pdev->pdev;
-		kfree(mx_node);
-
-		destroy_mx_pdev(mx_pdev);
-
-		pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
-				pdev->vendor, pdev->device, dev_name(&pdev->dev));
-	}
+	while ((mx_pdev = mx_pdev_unregister_any()) != NULL)
+		remove_mx_pdev(mx_pdev);
 }
 #endif
 
