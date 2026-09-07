@@ -19,21 +19,32 @@ int transfer_id_alloc(void *ptr)
 	return id;
 }
 
-void transfer_id_free(unsigned long id)
+void transfer_id_free(struct mx_transfer *transfer)
 {
-	spin_lock(&id_lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&id_lock, flags);
+	if (idr_find(&mx_ids, transfer->id) == transfer)
+		idr_remove(&mx_ids, transfer->id);
+	spin_unlock_irqrestore(&id_lock, flags);
+}
+
+struct mx_transfer *transfer_id_claim_completion(unsigned long id,
+						 unsigned long *flags)
+{
+	struct mx_transfer *transfer;
+
+	spin_lock_irqsave(&id_lock, *flags);
+	transfer = idr_find(&mx_ids, id);
+	if (!transfer || atomic_cmpxchg(&transfer->wait_claimed, 0, 1) != 0) {
+		spin_unlock_irqrestore(&id_lock, *flags);
+		return NULL;
+	}
 	idr_remove(&mx_ids, id);
-	spin_unlock(&id_lock);
+	return transfer;
 }
 
-void *find_transfer_by_id(unsigned long id)
+void transfer_id_complete_unlock(unsigned long flags)
 {
-	void *ptr;
-
-	spin_lock(&id_lock);
-	ptr = idr_find(&mx_ids, id);
-	spin_unlock(&id_lock);
-
-	return ptr;
+	spin_unlock_irqrestore(&id_lock, flags);
 }
-

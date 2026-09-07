@@ -1,3 +1,16 @@
+- name: "MX Driver Lease Component Test"
+  description: "Lease state machine, OFD lifetime, UAPI layout, and source invariants"
+  targets:
+    - qemu
+  tags:
+    - push
+    - pr
+    - scheduled
+  command: |
+    set -e
+    driver_dir="$([ -f "$HOME/driver/mxdriver/Makefile" ] && echo "$HOME/driver/mxdriver" || echo "$HOME/driver")"
+    make -C "$driver_dir" test-lease test-ofd test-uapi test-source
+
 - name: "MX Driver DMA Test"
   description: "DMA test against this driver, after install + reboot"
   targets:
