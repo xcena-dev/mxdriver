@@ -73,6 +73,21 @@ search_re 'try_module_get\(THIS_MODULE\)' init.c
 search_re 'mxdma_enumerate_bound_devices' init.c
 search_re 'device_lock\(&pdev->dev\)' init.c
 search_re 'strcmp\(pdev->dev.driver->name, "cxl_pci"\)' init.c
+# Keep main's single-owner detach rule together with the lease branch's
+# ability to retain an ambiguous device for later recovery.
+detach_block=$(sed -n '/^static void mxdma_detach_device(/,/^}/p' init.c)
+unlink_line=$(awk '/list_del_init\(/ { print NR; exit }' <<<"$detach_block")
+unlock_line=$(awk '/mutex_unlock\(/ { print NR; exit }' <<<"$detach_block")
+destroy_line=$(awk '/if \(!destroy_mx_pdev\(/ { print NR; exit }' <<<"$detach_block")
+[[ -n $unlink_line && -n $unlock_line && -n $destroy_line ]]
+(( unlink_line < unlock_line && unlock_line < destroy_line ))
+grep -Fq 'list_add_tail(&mx_pdev->registry_entry' <<<"$detach_block"
+create_block=$(sed -n '/^static int create_mx_pdev(/,/^}/p' init.c)
+revision_line=$(awk '/switch \(pdev->revision\)/ { print NR; exit }' <<<"$create_block")
+allocation_line=$(awk '/mx_pdev = kzalloc\(/ { print NR; exit }' <<<"$create_block")
+[[ -n $revision_line && -n $allocation_line ]]
+(( revision_line < allocation_line ))
+grep -Fq '*out_pdev = NULL;' <<<"$create_block"
 search_fixed 'saved_dma_mask = *pdev->dev.dma_mask' init.c
 search_fixed 'saved_coherent_dma_mask = pdev->dev.coherent_dma_mask' init.c
 search_fixed 'dma_set_mask(&pdev->dev, mx_pdev->saved_dma_mask)' init.c

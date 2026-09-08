@@ -8,6 +8,8 @@
 static struct class *mxdma_class;
 struct kmem_cache *mx_transfer_cache;
 
+/* CXL driver_data belongs to cxl_pci. Both modes use our own embedded
+ * registry entries and refcounted allocations, never foreign devres. */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
 static bool mxdma_accepting_devices;
@@ -163,7 +165,7 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 
 	ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
 	if (ret) {
-		pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
+		pr_err("Failed to request_threaded_irq (irq=%d, err=%d)\n", irq, ret);
 		return ret;
 	}
 	mx_pdev->irq_requested = true;
@@ -757,9 +759,23 @@ stop_protocol:
 static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 			  struct mx_pci_dev **out_pdev)
 {
+	void (*register_mx_ops)(struct mx_operations *ops);
 	struct mx_pci_dev *mx_pdev;
 	int type;
 	int ret;
+
+	*out_pdev = NULL;
+	switch (pdev->revision) {
+	case 0x1:
+		register_mx_ops = register_mx_ops_v1;
+		break;
+	case 0x2:
+		register_mx_ops = register_mx_ops_v2;
+		break;
+	default:
+		pr_err("Unknown PCI device revision %d\n", pdev->revision);
+		return -EINVAL;
+	}
 
 	mx_pdev = kzalloc(sizeof(*mx_pdev), GFP_KERNEL);
 	if (!mx_pdev)
@@ -782,16 +798,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	INIT_LIST_HEAD(&mx_pdev->zombie_list);
 	spin_lock_init(&mx_pdev->zombie_lock);
 
-	if (pdev->revision == 0x1) {
-		register_mx_ops_v1(&mx_pdev->ops);
-		pr_info("PCI device revision 1 detected\n");
-	} else if (pdev->revision == 0x2) {
-		register_mx_ops_v2(&mx_pdev->ops);
-		pr_info("PCI device revision 2 detected\n");
-	} else {
-		pr_err("Unknown PCI device revision %d\n", pdev->revision);
-		return -EINVAL;
-	}
+	register_mx_ops(&mx_pdev->ops);
+	pr_info("PCI device revision %d detected\n", pdev->revision);
 
 	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req,
 				    MX_CPU_LATENCY_QOS_US);
@@ -1006,15 +1014,21 @@ static void mxdma_detach_device(struct pci_dev *pdev)
 
 	mutex_lock(&mx_device_list_lock);
 	mx_pdev = mxdma_find_device_locked(pdev);
+	/* Claim teardown under the registry lock, as in main: two detach
+	 * callers must never both take the same per-device object. */
+	if (mx_pdev)
+		list_del_init(&mx_pdev->registry_entry);
 	mutex_unlock(&mx_device_list_lock);
 	if (!mx_pdev)
 		return;
-	if (!destroy_mx_pdev(mx_pdev, true))
+	if (!destroy_mx_pdev(mx_pdev, true)) {
+		/* Unlike a devres-owned baseline object, ambiguous DMA state is
+		 * pinned and must remain discoverable for a later real teardown. */
+		mutex_lock(&mx_device_list_lock);
+		list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
+		mutex_unlock(&mx_device_list_lock);
 		return;
-	mutex_lock(&mx_device_list_lock);
-	if (!list_empty(&mx_pdev->registry_entry))
-		list_del_init(&mx_pdev->registry_entry);
-	mutex_unlock(&mx_device_list_lock);
+	}
 	pr_info("pci device is detached (vendor=%#x device=%#x bdf=%s)\n",
 		pdev->vendor, pdev->device, dev_name(&pdev->dev));
 	mxdma_drop_attachment(mx_pdev, pdev);
