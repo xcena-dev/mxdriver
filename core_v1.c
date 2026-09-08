@@ -366,8 +366,11 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {
-		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
-		return PTR_ERR(mx_pdev->submit_thread);
+		int ret = PTR_ERR(mx_pdev->submit_thread);
+
+		pr_err("Failed to create submit thread (err=%d)\n", ret);
+		mx_pdev->submit_thread = NULL;
+		return ret;
 	}
 	/*
 	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
@@ -380,9 +383,13 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
-		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		int ret = PTR_ERR(mx_pdev->complete_thread);
+
+		pr_err("Failed to create complete thread (err=%d)\n", ret);
 		kthread_stop(mx_pdev->submit_thread);
-		return PTR_ERR(mx_pdev->complete_thread);
+		mx_pdev->submit_thread = NULL;
+		mx_pdev->complete_thread = NULL;
+		return ret;
 	}
 	sched_set_fifo_low(mx_pdev->complete_thread);
 
