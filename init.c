@@ -66,9 +66,11 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 		free_irq(pci_irq_vector(pdev, 0), mx_pdev);
 		mx_pdev->irq_requested = false;
 	}
-#ifdef CONFIG_WO_CXL
-	pci_disable_msi(pdev);
-#endif
+
+	if (mx_pdev->msi_enabled_by_us) {
+		pci_disable_msi(pdev);
+		mx_pdev->msi_enabled_by_us = false;
+	}
 }
 
 static int pci_device_init(struct mx_pci_dev* mx_pdev)
@@ -99,6 +101,7 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 			pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
 			return ret;
 		}
+		mx_pdev->msi_enabled_by_us = true;
 	}
 
 	int irq = pci_irq_vector(pdev, 0);
@@ -109,7 +112,7 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 
 	ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
 	if (ret) {
-		pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
+		pr_err("Failed to request_threaded_irq (irq=%d, err=%d)\n", irq, ret);
 		return ret;
 	}
 	mx_pdev->irq_requested = true;
@@ -121,10 +124,15 @@ static void dev_unmap(struct mx_pci_dev *mx_pdev)
 {
 	struct pci_dev *pdev = mx_pdev->pdev;
 
-	if (mx_pdev->bar)
+	if (mx_pdev->bar) {
 		pci_iounmap(pdev, mx_pdev->bar);
+		mx_pdev->bar = NULL;
+	}
 
-	pci_release_region(pdev, MXDMA_BAR_INDEX);
+	if (mx_pdev->bar_requested) {
+		pci_release_region(pdev, MXDMA_BAR_INDEX);
+		mx_pdev->bar_requested = false;
+	}
 }
 
 static int dev_map(struct mx_pci_dev *mx_pdev)
@@ -138,13 +146,13 @@ static int dev_map(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to pci_request_region (err=%d)\n", ret);
 		return ret;
 	}
+	mx_pdev->bar_requested = true;
 
 	size = pci_resource_len(pdev, MXDMA_BAR_INDEX);
 	mx_pdev->bar = pci_iomap(pdev, MXDMA_BAR_INDEX, size);
 	if (!mx_pdev->bar) {
 		pr_err("Failed to pci_iomap (size=%llu)\n",
 				(unsigned long long)size);
-		pci_release_region(pdev, MXDMA_BAR_INDEX);
 		return -ENOMEM;
 	}
 
@@ -429,18 +437,32 @@ static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
 
 	dev_unmap(mx_pdev);
-	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
+	if (mx_pdev->dev_no)
+		unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
 	pci_device_exit(mx_pdev);
 }
 
 static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 			  struct mx_pci_dev **mx_pdev_out)
 {
+	void (*register_mx_ops)(struct mx_operations *ops);
 	struct mx_pci_dev *mx_pdev;
 	int type;
 	int ret;
 
 	*mx_pdev_out = NULL;
+
+	switch (pdev->revision) {
+	case 0x1:
+		register_mx_ops = register_mx_ops_v1;
+		break;
+	case 0x2:
+		register_mx_ops = register_mx_ops_v2;
+		break;
+	default:
+		pr_err("Unknown PCI device revision %d\n", pdev->revision);
+		return -EINVAL;
+	}
 
 	mx_pdev = devm_kzalloc(&pdev->dev, sizeof(struct mx_pci_dev), GFP_KERNEL);
 	if (!mx_pdev) {
@@ -457,22 +479,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	mx_pdev->reserved_hio_qid = -1;
 	mutex_init(&mx_pdev->bar_mmap_lock);
 
-	if (pdev->revision == 0x1) {
-		register_mx_ops_v1(&mx_pdev->ops);
-		pr_info("PCI device revision 1 detected\n");
-	} else if (pdev->revision == 0x2) {
-		register_mx_ops_v2(&mx_pdev->ops);
-		pr_info("PCI device revision 2 detected\n");
-	} else {
-		pr_err("Unknown PCI device revision %d\n", pdev->revision);
-		return -EINVAL;
-	}
+	register_mx_ops(&mx_pdev->ops);
+	pr_info("PCI device revision %d detected\n", pdev->revision);
 
 	/*
 	 * Hold a cpu_latency PM QoS for the device's lifetime to block deep C-states whose exit latency would stretch
 	 * the freq ramp-up window that adds ~12 us to cold DMA submissions in our measurements.
 	 * Acquired after ops registration so every failure below can route through out_fail -> destroy_mx_pdev() for
-	 * symmetric cleanup; the unknown-revision early return above must not leak a QoS request.
+	 * symmetric cleanup, which needs the release_queue hook in place.
 	 */
 	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req, MX_CPU_LATENCY_QOS_US);
 

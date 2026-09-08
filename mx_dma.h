@@ -339,9 +339,9 @@ struct mx_pci_dev {
 	void __iomem *bar;
 	resource_size_t bar_mapped_size;
 
-	/* Set once request_threaded_irq() succeeds so teardown only frees an IRQ
-	 * that was actually requested. */
+	bool bar_requested;
 	bool irq_requested;
+	bool msi_enabled_by_us;
 
 	struct mutex bar_mmap_lock;
 	struct address_space *mmap_mapping;
