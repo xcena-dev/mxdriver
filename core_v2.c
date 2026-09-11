@@ -617,5 +617,6 @@ void register_mx_ops_v2(struct mx_operations *ops)
 	ops->release_queue = release_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
+	ops->bar_mmap = mxdma_bar_mmap_common;
 }
 
