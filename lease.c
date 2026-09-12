@@ -25,7 +25,8 @@
 	MX_LEASE_CAP_WORKLOAD_PROOF_BINDING | \
 	MX_LEASE_CAP_CANONICAL_SLOT_OFD_PROOF | \
 	MX_LEASE_CAP_COORDINATED_PARTICIPANTS | \
-	MX_LEASE_CAP_WORKLOAD_OFD_LIFETIME)
+	MX_LEASE_CAP_WORKLOAD_OFD_LIFETIME | \
+	MX_LEASE_CAP_SCOPED_MEMORY_COMMANDS)
 
 static_assert(sizeof(struct mx_lease_caps) == 64);
 static_assert(sizeof(struct mx_lease_acquire) == 128);
@@ -1141,4 +1142,18 @@ int mx_lease_authorize_no_completion(struct mx_file_ctx *ctx)
 	 * lease/fence decision a guess, including legacy-to-sandbox handover.
 	 */
 	return ctx ? -EOPNOTSUPP : -EINVAL;
+}
+
+int mx_lease_authorize_memory_cmd(struct mx_file_ctx *ctx, u16 subopcode)
+{
+	struct mx_device_lease *lease;
+	int ret;
+
+	if (!ctx || !ctx->mx_pdev)
+		return -EINVAL;
+	lease = &ctx->mx_pdev->lease;
+	mutex_lock(&lease->lock);
+	ret = mx_lease_sm_authorize_memory_cmd(ctx->lease.profile, subopcode);
+	mutex_unlock(&lease->lock);
+	return ret;
 }

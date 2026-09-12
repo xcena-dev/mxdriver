@@ -74,6 +74,18 @@ static inline bool mx_lease_sm_idle(const struct mx_lease_sm *sm)
 	       sm->workloads == 0 && !sm->quiescent;
 }
 
+static inline int mx_lease_sm_authorize_memory_cmd(u32 profile, u32 subopcode)
+{
+	if (profile > MX_LEASE_PROFILE_MAX)
+		return -EINVAL;
+	/* Gaia passthrough ABI: 3=UnpinAll, 6=UnloadAll. Range operations,
+	 * including Unmap (7), preserve another tenant's memory state. */
+	if ((subopcode == 3 || subopcode == 6) &&
+	    mx_lease_profile_family(profile) == MX_LEASE_FAMILY_COORDINATOR)
+		return -EPERM;
+	return 0;
+}
+
 /* A persistent state anchor remembers the topology even while its live-holder
  * counters are zero. Only the matching publisher may restart an idle family;
  * workloads attach after that publisher has re-established Quiescent.

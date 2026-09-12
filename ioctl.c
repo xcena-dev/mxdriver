@@ -594,6 +594,9 @@ static long ioctl_passthru_cmd(struct mx_file_ctx *file_ctx, unsigned long arg)
 
 	if (cmd.subopcode > 0xF)
 		return -EINVAL;
+	ret = mx_lease_authorize_memory_cmd(file_ctx, cmd.subopcode);
+	if (ret)
+		return ret;
 	if (cmd.no_completion) {
 		ret = mx_lease_authorize_no_completion(file_ctx);
 		if (ret)

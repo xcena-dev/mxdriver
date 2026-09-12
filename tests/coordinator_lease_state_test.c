@@ -117,6 +117,17 @@ static void incomplete_setup_and_proof_separation(void)
 
 int main(void)
 {
+	u32 profile;
+
+	for (profile = 0; profile <= MX_LEASE_PROFILE_MAX; ++profile) {
+		int expected = mx_lease_profile_family(profile) == MX_LEASE_FAMILY_COORDINATOR ? -EPERM : 0;
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 3) == expected);
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 6) == expected);
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 2) == 0); /* range Unpin */
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 5) == 0); /* range Unload */
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 7) == 0); /* range Unmap */
+	}
+	assert(mx_lease_sm_authorize_memory_cmd(MX_LEASE_PROFILE_MAX + 1, 3) == -EINVAL);
 	concurrent_controllers_and_workload();
 	incomplete_setup_and_proof_separation();
 	puts("coordinator lease state tests: PASS");

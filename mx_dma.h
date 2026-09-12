@@ -511,6 +511,7 @@ long mx_lease_ioctl(struct mx_file_ctx *ctx, unsigned int cmd, unsigned long arg
 int mx_lease_direct_begin(struct mx_file_ctx *ctx);
 void mx_lease_direct_end(struct mx_file_ctx *ctx);
 int mx_lease_authorize_no_completion(struct mx_file_ctx *ctx);
+int mx_lease_authorize_memory_cmd(struct mx_file_ctx *ctx, u16 subopcode);
 
 long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 				    uint64_t device_addr, uint64_t size, bool no_completion,
