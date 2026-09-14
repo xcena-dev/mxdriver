@@ -47,8 +47,9 @@
  * anchored host-local state inode. Recovery can reopen that inode even after
  * every daemon exits; no anonymous-pipe reader/keeper process is required. */
 #define MX_LEASE_CAP_WORKLOAD_OFD_LIFETIME (1ULL << 15)
-/* Coordinated holders cannot issue device-wide UnpinAll/UnloadAll. Their
- * ordinary SDK teardown must operate on owned DPA ranges instead. */
+/* The PASSTHRU_CMD ioctl rejects device-wide UnpinAll/UnloadAll for
+ * coordinated holders. Ordinary SDK teardown must use owned DPA ranges.
+ * This is an SDK-path guard, not isolation from raw HIO/mailbox/BAR access. */
 #define MX_LEASE_CAP_SCOPED_MEMORY_COMMANDS (1ULL << 16)
 
 #define MX_LEASE_MAX_WORKLOAD_SLOT 4095U

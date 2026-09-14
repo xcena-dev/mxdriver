@@ -1075,6 +1075,7 @@ static bool mxdma_is_bound_cxl_pci(struct pci_dev *pdev)
 static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, void *data)
 {
 	struct pci_dev *pdev;
+	int ret;
 
 	pdev = to_pci_dev(data);
 	if (pdev->vendor != XCENA_PCI_VENDOR_ID)
@@ -1084,8 +1085,13 @@ static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, voi
 	case BUS_NOTIFY_BOUND_DRIVER:
 		/* Vendor ID alone is insufficient: vfio-pci and diagnostic drivers
 		 * emit the same notifier event but do not provide the CXL lifecycle. */
-		if (mxdma_is_bound_cxl_pci(pdev))
-			mxdma_attach_device(pdev);
+		if (mxdma_is_bound_cxl_pci(pdev)) {
+			ret = mxdma_attach_device(pdev);
+			if (ret)
+				dev_err(&pdev->dev,
+					"failed to attach newly-bound CXL device: %d\n",
+					ret);
+		}
 		break;
 	case BUS_NOTIFY_UNBIND_DRIVER:
 		if (mxdma_is_bound_cxl_pci(pdev))
