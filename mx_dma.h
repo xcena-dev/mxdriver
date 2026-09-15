@@ -439,6 +439,10 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
  * See core_common.c. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
 
+/* Maps the whole BAR2 (pgoff 0, MAP_SHARED, length == pci_resource_len) into user space.
+ * Refused with -EBUSY while any mailbox is registered through the ioctl path.  See core_common.c. */
+int mxdma_bar_mmap_common(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma);
+
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
