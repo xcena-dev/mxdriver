@@ -182,10 +182,7 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 	if (ret)
 		return ret;
 
-	if (!mx_pdev->ops.bar_mmap)
-		return -EOPNOTSUPP;
-
-	return mx_pdev->ops.bar_mmap(mx_pdev, vma);
+	return mx_bar_mmap(mx_pdev, vma);
 }
 
 static __poll_t mxdma_device_poll(struct file *file, poll_table *wait)

@@ -23,6 +23,7 @@
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/aer.h>
+#include <linux/kref.h>
 #include <linux/kthread.h>
 #include <linux/numa.h>
 #include <linux/pm_qos.h>
@@ -265,6 +266,10 @@ struct mx_char_dev {
 	unsigned long magic;
 	struct mx_pci_dev *mx_pdev;
 	struct cdev cdev;
+	/* Embedded so cdev_device_add() parents the cdev kobject on it:
+	 * the node then outlives every open file,
+	 * and its release drops the mx_pci_dev reference it holds. */
+	struct device dev;
 	dev_t cdev_no;
 
 	bool nowait;
@@ -318,11 +323,24 @@ struct mx_operations {
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
-	int (*bar_mmap) (struct mx_pci_dev *, struct vm_area_struct *);
 } __randomize_layout;
+
+/* Refcounted separately because BAR VMAs can outlive mx_pci_dev. */
+struct mx_bar_map {
+	struct kref kref;
+	/* Also protects mx_pci_dev.enabled and sq_mbox_list while they exist. */
+	struct mutex lock;
+	/* Track mappings before the kernel links their VMAs into i_mmap. */
+	unsigned int count;
+	/* Used to revoke BAR PTEs during teardown. NULL when count is zero. */
+	struct address_space *mapping;
+};
 
 struct mx_pci_dev {
 	unsigned long magic;
+	/* Not devm: open files and BAR VMAs outlive the PCI unbind.
+	 * Held once by probe and once per character device. */
+	struct kref ref;
 	int dev_id;
 	dev_t dev_no;
 
@@ -343,8 +361,7 @@ struct mx_pci_dev {
 	bool irq_requested;
 	bool msi_enabled_by_us;
 
-	struct mutex bar_mmap_lock;
-	struct address_space *mmap_mapping;
+	struct mx_bar_map *bar_map;
 
 	struct mx_operations ops;
 
@@ -493,6 +510,10 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread))
 		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->complete_thread, mask));
 }
+
+struct mx_bar_map *mx_bar_map_alloc(void);
+void mx_bar_map_put(struct mx_bar_map *bar_map);
+int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma);
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);

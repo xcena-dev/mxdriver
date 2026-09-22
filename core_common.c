@@ -502,3 +502,135 @@ int mx_complete_handler(void *arg)
 
 	return 0;
 }
+
+/******************************************************************************/
+/* BAR mapping                                                                */
+/******************************************************************************/
+static void mx_bar_map_release(struct kref *kref)
+{
+	struct mx_bar_map *bar_map = container_of(kref, struct mx_bar_map, kref);
+
+	mutex_destroy(&bar_map->lock);
+	kfree(bar_map);
+}
+
+struct mx_bar_map *mx_bar_map_alloc(void)
+{
+	struct mx_bar_map *bar_map;
+
+	bar_map = kzalloc(sizeof(*bar_map), GFP_KERNEL);
+	if (!bar_map)
+		return NULL;
+
+	kref_init(&bar_map->kref);
+	mutex_init(&bar_map->lock);
+
+	return bar_map;
+}
+
+void mx_bar_map_put(struct mx_bar_map *bar_map)
+{
+	kref_put(&bar_map->kref, mx_bar_map_release);
+}
+
+/* Account for VMAs created by fork or a split. */
+static void mx_bar_vma_open(struct vm_area_struct *vma)
+{
+	struct mx_bar_map *bar_map = vma->vm_private_data;
+
+	mutex_lock(&bar_map->lock);
+	kref_get(&bar_map->kref);
+	bar_map->count++;
+	mutex_unlock(&bar_map->lock);
+}
+
+static void mx_bar_vma_close(struct vm_area_struct *vma)
+{
+	struct mx_bar_map *bar_map = vma->vm_private_data;
+
+	mutex_lock(&bar_map->lock);
+	if (!WARN_ON_ONCE(!bar_map->count)) {
+		bar_map->count--;
+		/* The address_space is valid only while a VMA pins its inode. */
+		if (!bar_map->count)
+			bar_map->mapping = NULL;
+	}
+	mutex_unlock(&bar_map->lock);
+
+	/* The final put destroys the mutex. */
+	mx_bar_map_put(bar_map);
+}
+
+static const struct vm_operations_struct mx_bar_vm_ops = {
+	.open	= mx_bar_vma_open,
+	.close	= mx_bar_vma_close,
+};
+
+/* dev_map() derives the BAR base and size from PCI resources. */
+int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma)
+{
+	struct mx_bar_map *bar_map = mx_pdev->bar_map;
+	resource_size_t vm_size;
+	unsigned long pfn;
+	uint32_t qid;
+	int ret;
+
+	mutex_lock(&bar_map->lock);
+
+	/* Serialize the online check with device teardown. */
+	if (!mx_pdev->enabled) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	/* BAR MMIO and ioctl mailboxes cannot own the same regions. Registration
+	 * has no undo path, so any registered mailbox blocks mmap permanently. */
+	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
+		if (mx_pdev->sq_mbox_list[qid]) {
+			ret = -EBUSY;
+			goto out_unlock;
+		}
+	}
+
+	if (vma->vm_pgoff != 0) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (!(vma->vm_flags & VM_SHARED)) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	vm_size = vma->vm_end - vma->vm_start;
+	if (vm_size != mx_pdev->bar_mapped_size) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#else
+	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
+
+	/* Userspace must leave driver-owned regions in the full-BAR mapping untouched. */
+	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
+
+	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
+				 vma->vm_page_prot);
+	if (!ret) {
+		/* All BAR mappings through this cdev share one address_space. */
+		bar_map->mapping = vma->vm_file->f_mapping;
+		vma->vm_private_data = bar_map;
+		vma->vm_ops = &mx_bar_vm_ops;
+		/* vm_ops->open is not called for the initial VMA. */
+		kref_get(&bar_map->kref);
+		bar_map->count++;
+	}
+
+out_unlock:
+	mutex_unlock(&bar_map->lock);
+	return ret;
+}

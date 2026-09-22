@@ -244,12 +244,10 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mx_pdev->reserved_hio_qid >= 0 && mbox_info.qid == (uint32_t)mx_pdev->reserved_hio_qid)
 		return -EBUSY;
 
-	mutex_lock(&mx_pdev->bar_mmap_lock);
-	/* Mutually exclusive with an actively mapped BAR: a mapped BAR lets userspace drive
-	 * the mailbox region, so a kernel mailbox would double-own it. mapping_mapped() reads
-	 * live VMAs, so registration reopens once userspace munmaps the BAR. */
-	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
-		mutex_unlock(&mx_pdev->bar_mmap_lock);
+	mutex_lock(&mx_pdev->bar_map->lock);
+	/* BAR MMIO and kernel mailboxes cannot coexist. */
+	if (mx_pdev->bar_map->count) {
+		mutex_unlock(&mx_pdev->bar_map->lock);
 		return -EBUSY;
 	}
 	/* Idempotent only for the same context: a populated slot with matching SQ+CQ ctx
@@ -258,10 +256,10 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
 		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
 
-		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		mutex_unlock(&mx_pdev->bar_map->lock);
 		return matches ? 0 : -EINVAL;
 	}
-	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	mutex_unlock(&mx_pdev->bar_map->lock);
 
 	sq_mbox = create_mx_mbox(mx_pdev, mbox_info.sq_ctx_addr, mbox_info.sq_data_addr);
 	if (IS_ERR(sq_mbox))
@@ -273,12 +271,10 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return PTR_ERR(cq_mbox);
 	}
 
-	/* Commit under the lock and re-check: while the mailboxes were built outside
-	 * the lock a concurrent mmap may have claimed the BAR, or another thread may
-	 * have registered this qid. */
-	mutex_lock(&mx_pdev->bar_mmap_lock);
-	if (mx_pdev->mmap_mapping && mapping_mapped(mx_pdev->mmap_mapping)) {
-		mutex_unlock(&mx_pdev->bar_mmap_lock);
+	/* Recheck ownership before publishing mailboxes built outside the lock. */
+	mutex_lock(&mx_pdev->bar_map->lock);
+	if (mx_pdev->bar_map->count) {
+		mutex_unlock(&mx_pdev->bar_map->lock);
 		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
 		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
 		return -EBUSY;
@@ -286,14 +282,14 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
 		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
 
-		mutex_unlock(&mx_pdev->bar_mmap_lock);
+		mutex_unlock(&mx_pdev->bar_map->lock);
 		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
 		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
 		return matches ? 0 : -EINVAL;
 	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;
 	mx_pdev->cq_mbox_list[mbox_info.qid] = cq_mbox;
-	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	mutex_unlock(&mx_pdev->bar_map->lock);
 
 	return 0;
 }

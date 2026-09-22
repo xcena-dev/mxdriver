@@ -14,13 +14,12 @@ struct kmem_cache *mx_transfer_cache;
  * field belongs to cxl_pci.  We ride the PCI bus notifier instead of binding,
  * and keep our own pci_dev -> mx_pci_dev registry here.
  *
- * The registry nodes are ours (kzalloc/kfree), but mx_pci_dev itself and the
- * queues and mailboxes hanging off it still come from devm_* on that foreign
- * device, so their lifetime ends at cxl_pci's devres teardown.  That is safe
- * only because the driver core hands us BUS_NOTIFY_UNBIND_DRIVER before it
- * releases devres, i.e. our teardown always runs first.  Anything added here
- * must keep that ordering in mind until the allocations move to our own
- * lifetime.
+ * The registry nodes and mx_pci_dev are ours (kzalloc, kref), but the queues
+ * and mailboxes hanging off it still come from devm_* on that foreign device,
+ * so their lifetime ends at cxl_pci's devres teardown.  That is safe only
+ * because the driver core hands us BUS_NOTIFY_UNBIND_DRIVER before it releases
+ * devres, i.e. our teardown always runs first.  Anything added here must keep
+ * that ordering in mind until those allocations move to our own lifetime too.
  */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
@@ -340,47 +339,70 @@ static const struct attribute_group *mxdma_dev_groups[] = {
 	NULL,
 };
 
+static void mx_pdev_release(struct kref *ref)
+{
+	kfree(container_of(ref, struct mx_pci_dev, ref));
+}
+
+static void mx_pdev_put(struct mx_pci_dev *mx_pdev)
+{
+	kref_put(&mx_pdev->ref, mx_pdev_release);
+}
+
+/* Runs after the last cdev_put() on this node, i.e. once every file that was
+ * opened on it is gone. */
+static void mx_cdev_release(struct device *dev)
+{
+	struct mx_char_dev *mx_cdev = container_of(dev, struct mx_char_dev, dev);
+
+	mx_pdev_put(mx_cdev->mx_pdev);
+}
+
 static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 {
 	struct mx_char_dev *mx_cdev = &mx_pdev->mx_cdev[type];
-	struct device *dev;
 	int ret;
 
 	mx_cdev->magic = MAGIC_CHAR;
+	mx_cdev->mx_pdev = mx_pdev;
 	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
-	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->dev_id);
 
-	ret = cdev_add(&mx_cdev->cdev, mx_cdev->cdev_no, 1);
+	kref_get(&mx_pdev->ref);
+	device_initialize(&mx_cdev->dev);
+	mx_cdev->dev.class = mxdma_class;
+	mx_cdev->dev.devt = mx_cdev->cdev_no;
+	mx_cdev->dev.release = mx_cdev_release;
+	/* The ioctl node is the device's control node: hang the liveness/ sysfs
+	 * group off it, with drvdata so its show/store reach mx_pdev. */
+	if (type == MX_CDEV_IOCTL) {
+		mx_cdev->dev.groups = mxdma_dev_groups;
+		dev_set_drvdata(&mx_cdev->dev, mx_pdev);
+	}
+
+	ret = dev_set_name(&mx_cdev->dev, node_name[type], mx_pdev->dev_id);
+	if (ret)
+		goto out_put;
+
+	ret = cdev_device_add(&mx_cdev->cdev, &mx_cdev->dev);
 	if (ret) {
-		pr_err("Failed to cdev_add (err=%d)\n", ret);
-		return ret;
+		pr_err("Failed to cdev_device_add (err=%d)\n", ret);
+		goto out_put;
 	}
 
-	/* Hang the per-device liveness/ sysfs group off the ioctl node, the device's
-	 * control node; drvdata lets its show/store reach mx_pdev. */
-	if (type == MX_CDEV_IOCTL)
-		dev = device_create_with_groups(mxdma_class, NULL, mx_cdev->cdev_no,
-						mx_pdev, mxdma_dev_groups,
-						mx_cdev->cdev.kobj.name);
-	else
-		dev = device_create(mxdma_class, NULL, mx_cdev->cdev_no, NULL, mx_cdev->cdev.kobj.name);
-	if (IS_ERR(dev)) {
-		pr_err("Failed to device_created (err=%ld)\n", PTR_ERR(dev));
-		/* Unregister now: enabled is still false, so destroy_mx_cdev skips this
-		 * node and a registered cdev would outlive its devm-freed struct. */
-		cdev_del(&mx_cdev->cdev);
-		return PTR_ERR(dev);
-	}
-
-	mx_cdev->mx_pdev = mx_pdev;
 	mx_cdev->enabled = true;
 
-	pr_info("%s (%d:%d) is created\n", mx_cdev->cdev.kobj.name,
+	pr_info("%s (%d:%d) is created\n", dev_name(&mx_cdev->dev),
 			MAJOR(mx_cdev->cdev_no), MINOR(mx_cdev->cdev_no));
 
 	return 0;
+
+out_put:
+	/* Drops the reference device_initialize() handed us;
+	 * the release returns the mx_pdev reference taken above. */
+	put_device(&mx_cdev->dev);
+	return ret;
 }
 
 static void destroy_mx_cdev(struct mx_char_dev *mx_cdev)
@@ -389,11 +411,13 @@ static void destroy_mx_cdev(struct mx_char_dev *mx_cdev)
 		return;
 	mx_cdev->enabled = false;
 
-	pr_info("%s (%d:%d) is destroyed\n", mx_cdev->cdev.kobj.name,
+	pr_info("%s (%d:%d) is destroyed\n", dev_name(&mx_cdev->dev),
 			MAJOR(mx_cdev->cdev_no), MINOR(mx_cdev->cdev_no));
 
-	device_destroy(mxdma_class, mx_cdev->cdev_no);
-	cdev_del(&mx_cdev->cdev);
+	cdev_device_del(&mx_cdev->cdev, &mx_cdev->dev);
+	/* Probe's reference only. Open files still pin the cdev kobject and,
+	 * through it, this device, so the release waits for the last of them. */
+	put_device(&mx_cdev->dev);
 }
 
 static void mxdma_device_online(struct mx_pci_dev *mx_pdev)
@@ -403,9 +427,9 @@ static void mxdma_device_online(struct mx_pci_dev *mx_pdev)
 
 static void mxdma_device_offline(struct mx_pci_dev *mx_pdev)
 {
-	mutex_lock(&mx_pdev->bar_mmap_lock);
+	mutex_lock(&mx_pdev->bar_map->lock);
 	mx_pdev->enabled = false;
-	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	mutex_unlock(&mx_pdev->bar_map->lock);
 }
 
 static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
@@ -414,12 +438,12 @@ static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 
 	mxdma_device_offline(mx_pdev);
 
-	mutex_lock(&mx_pdev->bar_mmap_lock);
-	if (mx_pdev->mmap_mapping) {
-		unmap_mapping_range(mx_pdev->mmap_mapping, 0, 0, 1);
-		mx_pdev->mmap_mapping = NULL;
+	mutex_lock(&mx_pdev->bar_map->lock);
+	if (mx_pdev->bar_map->mapping) {
+		unmap_mapping_range(mx_pdev->bar_map->mapping, 0, 0, 1);
+		mx_pdev->bar_map->mapping = NULL;
 	}
-	mutex_unlock(&mx_pdev->bar_mmap_lock);
+	mutex_unlock(&mx_pdev->bar_map->lock);
 
 	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
 		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
@@ -440,6 +464,14 @@ static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 	if (mx_pdev->dev_no)
 		unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
 	pci_device_exit(mx_pdev);
+
+	/* Live VMAs keep bar_map alive after mx_pdev is released. */
+	mx_bar_map_put(mx_pdev->bar_map);
+	mx_pdev->bar_map = NULL;
+
+	/* Probe's reference. Nodes with files still open keep their own,
+	 * so mx_pdev is freed only after the last of those closes. */
+	mx_pdev_put(mx_pdev);
 }
 
 static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
@@ -464,11 +496,12 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		return -EINVAL;
 	}
 
-	mx_pdev = devm_kzalloc(&pdev->dev, sizeof(struct mx_pci_dev), GFP_KERNEL);
+	mx_pdev = kzalloc(sizeof(struct mx_pci_dev), GFP_KERNEL);
 	if (!mx_pdev) {
 		pr_err("Failed to alloc mx_pci_dev\n");
 		return -ENOMEM;
 	}
+	kref_init(&mx_pdev->ref);
 
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
@@ -477,7 +510,14 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	mx_pdev->liveness_dead_ms = LIVENESS_DEAD_MS_DEFAULT;
 	mx_pdev->liveness_max_mult = LIVENESS_MAX_MULT_DEFAULT;
 	mx_pdev->reserved_hio_qid = -1;
-	mutex_init(&mx_pdev->bar_mmap_lock);
+
+	/* destroy_mx_pdev() assumes bar_map exists. */
+	mx_pdev->bar_map = mx_bar_map_alloc();
+	if (!mx_pdev->bar_map) {
+		pr_err("Failed to alloc mx_bar_map\n");
+		mx_pdev_put(mx_pdev);
+		return -ENOMEM;
+	}
 
 	register_mx_ops(&mx_pdev->ops);
 	pr_info("PCI device revision %d detected\n", pdev->revision);
