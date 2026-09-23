@@ -10,16 +10,9 @@ struct kmem_cache *mx_transfer_cache;
 
 #ifndef CONFIG_WO_CXL
 /*
- * In CXL mode cxl_pci is the driver bound to the device, so its driver_data
- * field belongs to cxl_pci.  We ride the PCI bus notifier instead of binding,
- * and keep our own pci_dev -> mx_pci_dev registry here.
- *
- * The registry nodes and mx_pci_dev are ours (kzalloc, kref), but the queues
- * and mailboxes hanging off it still come from devm_* on that foreign device,
- * so their lifetime ends at cxl_pci's devres teardown.  That is safe only
- * because the driver core hands us BUS_NOTIFY_UNBIND_DRIVER before it releases
- * devres, i.e. our teardown always runs first.  Anything added here must keep
- * that ordering in mind until those allocations move to our own lifetime too.
+ * In CXL mode cxl_pci owns the device and its driver_data,
+ * so we ride the PCI bus notifier and keep a pci_dev -> mx_pci_dev registry here.
+ * Nothing is devm on that foreign device except the pcim_enable_device() fallback.
  */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
@@ -341,12 +334,23 @@ static const struct attribute_group *mxdma_dev_groups[] = {
 
 static void mx_pdev_release(struct kref *ref)
 {
-	kfree(container_of(ref, struct mx_pci_dev, ref));
+	struct mx_pci_dev *mx_pdev = container_of(ref, struct mx_pci_dev, ref);
+
+	percpu_ref_exit(&mx_pdev->io_ref);
+	pci_dev_put(mx_pdev->pdev);
+	kfree(mx_pdev);
 }
 
 static void mx_pdev_put(struct mx_pci_dev *mx_pdev)
 {
 	kref_put(&mx_pdev->ref, mx_pdev_release);
+}
+
+static void mx_pdev_io_release(struct percpu_ref *ref)
+{
+	struct mx_pci_dev *mx_pdev = container_of(ref, struct mx_pci_dev, io_ref);
+
+	wake_up_all(&mx_pdev->io_quiesce_wq);
 }
 
 /* Runs after the last cdev_put() on this node, i.e. once every file that was
@@ -427,9 +431,22 @@ static void mxdma_device_online(struct mx_pci_dev *mx_pdev)
 
 static void mxdma_device_offline(struct mx_pci_dev *mx_pdev)
 {
+	unsigned int waited_s = 0;
+
 	mutex_lock(&mx_pdev->bar_map->lock);
 	mx_pdev->enabled = false;
 	mutex_unlock(&mx_pdev->bar_map->lock);
+
+	percpu_ref_kill(&mx_pdev->io_ref);
+	/* Sleeping pollers hold no io_ref; wake them so they re-enter and fail. */
+	wake_up_all(&mx_pdev->event.wq);
+	/* The wait itself cannot be abandoned, so at least leave a trail while it lasts. */
+	while (!wait_event_timeout(mx_pdev->io_quiesce_wq,
+				   percpu_ref_is_zero(&mx_pdev->io_ref), 10 * HZ)) {
+		waited_s += 10;
+		pr_warn("mx_dma%d: in-flight I/O still holds up the unbind after %u s\n",
+			mx_pdev->dev_id, waited_s);
+	}
 }
 
 static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
@@ -445,6 +462,11 @@ static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 	}
 	mutex_unlock(&mx_pdev->bar_map->lock);
 
+	/* Deleting the nodes drains their sysfs callbacks (kernfs waits for active ones),
+	 * so from here only the gated fops can reach the queues. */
+	for (type = 0; type < NUM_OF_MX_CDEV; type++)
+		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
+
 	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
 		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
 
@@ -455,10 +477,10 @@ static void destroy_mx_pdev(struct mx_pci_dev *mx_pdev)
 			pr_err("Failed to stop zombie_cleanup_thread\n");
 	}
 
-	dma_pool_destroy(mx_pdev->page_pool);
+	mx_pdev->ops.free_queue(mx_pdev);
+	mx_mbox_release_all(mx_pdev);
 
-	for (type = 0; type < NUM_OF_MX_CDEV; type++)
-		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
+	dma_pool_destroy(mx_pdev->page_pool);
 
 	dev_unmap(mx_pdev);
 	if (mx_pdev->dev_no)
@@ -501,10 +523,18 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		pr_err("Failed to alloc mx_pci_dev\n");
 		return -ENOMEM;
 	}
+	ret = percpu_ref_init(&mx_pdev->io_ref, mx_pdev_io_release, 0, GFP_KERNEL);
+	if (ret) {
+		pr_err("Failed to init io_ref (err=%d)\n", ret);
+		kfree(mx_pdev);
+		return ret;
+	}
 	kref_init(&mx_pdev->ref);
+	init_waitqueue_head(&mx_pdev->io_quiesce_wq);
+	mx_event_init(mx_pdev);
 
 	mx_pdev->magic = MAGIC_DEVICE;
-	mx_pdev->pdev = pdev;
+	mx_pdev->pdev = pci_dev_get(pdev);
 	mx_pdev->dev_id = cxl_memdev_id;
 	mx_pdev->liveness_stall_ms = LIVENESS_STALL_MS_DEFAULT;
 	mx_pdev->liveness_dead_ms = LIVENESS_DEAD_MS_DEFAULT;
@@ -560,8 +590,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		goto out_fail;
 	}
 
-	mx_event_init(mx_pdev);
-
 	INIT_LIST_HEAD(&mx_pdev->zombie_list);
 	spin_lock_init(&mx_pdev->zombie_lock);
 	mx_pdev->zombie_cleanup_thread = kthread_run(zombie_cleanup_handler, mx_pdev,
@@ -572,20 +600,21 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		goto out_fail;
 	}
 
-	for (type = 0; type < NUM_OF_MX_CDEV; type++) {
-		ret = create_mx_cdev(mx_pdev, type);
-		if (ret) {
-			pr_err("Failed to create mx_cdev (%s) (err=%d)\n", node_name[type], ret);
-			goto out_fail;
-		}
-	}
-
 	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev,
 			mx_pdev->page_size, mx_pdev->page_size, 0);
 	if (!mx_pdev->page_pool) {
 		pr_err("Failed to create page_pool\n");
 		ret = -ENOMEM;
 		goto out_fail;
+	}
+
+	/* Last, so that a node userspace can open is already fully backed. */
+	for (type = 0; type < NUM_OF_MX_CDEV; type++) {
+		ret = create_mx_cdev(mx_pdev, type);
+		if (ret) {
+			pr_err("Failed to create mx_cdev (%s) (err=%d)\n", node_name[type], ret);
+			goto out_fail;
+		}
 	}
 
 	mxdma_device_online(mx_pdev);

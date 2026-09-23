@@ -15,6 +15,11 @@ static int mxdma_device_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 
+	/* cdev_device_del() does not stop chrdev_open() on an inode that already carries i_cdev,
+	 * so refuse new files once the device is going away. */
+	if (percpu_ref_is_dying(&mx_cdev->mx_pdev->io_ref))
+		return -ENODEV;
+
 	file->private_data = mx_cdev;
 
 	return 0;
@@ -40,7 +45,9 @@ static int mxdma_device_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int mxdma_device_prepare(struct file *file, struct mx_char_dev **mx_cdev, struct mx_pci_dev **mx_pdev)
+/* Every fops body runs between a successful get and its put;
+ * teardown kills io_ref and waits for zero before touching what the body uses. */
+static int mxdma_device_get(struct file *file, struct mx_char_dev **mx_cdev, struct mx_pci_dev **mx_pdev)
 {
 	*mx_cdev = (struct mx_char_dev *)file->private_data;
 	if (!*mx_cdev) {
@@ -64,19 +71,22 @@ static int mxdma_device_prepare(struct file *file, struct mx_char_dev **mx_cdev,
 		return -EINVAL;
 	}
 
-	if (!(*mx_pdev)->enabled) {
-		pr_warn("pci device isn't enabled. dev_no=%d", (*mx_pdev)->dev_no);
+	if (!percpu_ref_tryget_live(&(*mx_pdev)->io_ref))
 		return -ENODEV;
-	}
 
 	return 0;
+}
+
+static void mxdma_device_put(struct mx_pci_dev *mx_pdev)
+{
+	percpu_ref_put(&mx_pdev->io_ref);
 }
 
 static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	int ret;
+	ssize_t ret;
 
 	if (!count) {
 		pr_warn("size of data to read is zero\n");
@@ -88,19 +98,21 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 		return -EINVAL;
 	}
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
 	mx_prewake_handlers(mx_pdev);
-	return read_data_from_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_READ);
+	ret = read_data_from_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_READ);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	int ret;
+	ssize_t ret;
 
 	if (!count) {
 		pr_warn("size of data to read is zero\n");
@@ -112,64 +124,72 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 		return -EINVAL;
 	}
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
 	mx_prewake_handlers(mx_pdev);
-	return read_data_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_READ);
+	ret = read_data_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_READ);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	int ret;
+	ssize_t ret;
 
 	if (!count) {
 		pr_warn("size of data to write is zero\n");
 		return -EINVAL;
 	}
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
 	mx_prewake_handlers(mx_pdev);
-	return write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
+	ret = write_data_to_device_parallel(mx_pdev, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static ssize_t mxdma_device_write_context(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	int ret;
+	ssize_t ret;
 
 	if (!count) {
 		pr_warn("size of data to write is zero\n");
 		return -EINVAL;
 	}
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
 	mx_prewake_handlers(mx_pdev);
-	return write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, false);
+	ret = write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, false);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	int ret;
+	long ret;
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
 	mx_prewake_handlers(mx_pdev);
-	return ioctl_to_device(mx_pdev, cmd, arg);
+	ret = ioctl_to_device(mx_pdev, cmd, arg);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
@@ -178,11 +198,13 @@ static int mxdma_bar_mmap(struct file *file, struct vm_area_struct *vma)
 	struct mx_pci_dev *mx_pdev;
 	int ret;
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
 
-	return mx_bar_mmap(mx_pdev, vma);
+	ret = mx_bar_mmap(mx_pdev, vma);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static __poll_t mxdma_device_poll(struct file *file, poll_table *wait)
@@ -190,49 +212,42 @@ static __poll_t mxdma_device_poll(struct file *file, poll_table *wait)
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
 	struct mx_event *mx_event;
-	int ret;
+	__poll_t mask = 0;
 
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
+	if (mxdma_device_get(file, &mx_cdev, &mx_pdev))
 		return EPOLLERR;
 
 	mx_event = &mx_pdev->event;
 	poll_wait(file, &mx_event->wq, wait);
 
-	ret = atomic_read(&mx_event->count);
-	if (ret > 0) {
+	/* The kill and its wake-up may both predate our poll_wait() registration. */
+	if (percpu_ref_is_dying(&mx_pdev->io_ref)) {
+		mask = EPOLLERR;
+	} else if (atomic_read(&mx_event->count) > 0) {
 		atomic_dec(&mx_event->count);
-		return EPOLLIN | EPOLLRDNORM;
+		mask = EPOLLIN | EPOLLRDNORM;
 	}
 
-	return 0;
+	mxdma_device_put(mx_pdev);
+	return mask;
 }
 
 static ssize_t mxdma_bdf_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	struct mx_char_dev *mx_cdev = file->private_data;
+	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
-	struct pci_dev *pdev;
 	char bdf_str[32];
+	ssize_t ret;
 	int len;
 
-	if (!mx_cdev || !mx_cdev->mx_pdev)
-		return -ENODEV;
+	ret = mxdma_device_get(file, &mx_cdev, &mx_pdev);
+	if (ret)
+		return ret;
 
-	mx_pdev = mx_cdev->mx_pdev;
-	pdev = mx_pdev->pdev;
-
-	len = scnprintf(bdf_str, sizeof(bdf_str), "%s\n", dev_name(&pdev->dev));
-
-	return simple_read_from_buffer(buf, count, ppos, bdf_str, len);
-}
-
-static int mxdma_bdf_open(struct inode *inode, struct file *file)
-{
-	struct mx_char_dev *mx_cdev;
-	mx_cdev = container_of(inode->i_cdev, struct mx_char_dev, cdev);
-	file->private_data = mx_cdev;
-	return 0;
+	len = scnprintf(bdf_str, sizeof(bdf_str), "%s\n", dev_name(&mx_pdev->pdev->dev));
+	ret = simple_read_from_buffer(buf, count, ppos, bdf_str, len);
+	mxdma_device_put(mx_pdev);
+	return ret;
 }
 
 static const struct file_operations mxdma_fops_data = {
@@ -268,7 +283,8 @@ static const struct file_operations mxdma_fops_event = {
 
 static const struct file_operations mxdma_fops_bdf = {
 	.owner = THIS_MODULE,
-	.open = mxdma_bdf_open,
+	.open = mxdma_device_open,
+	.release = mxdma_device_release,
 	.read = mxdma_bdf_read,
 };
 

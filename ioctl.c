@@ -168,7 +168,6 @@ static uint32_t get_popable_count(struct mx_mbox *mbox)
  * (invalid context vs. failed read vs. OOM). */
 static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_addr, uint64_t data_addr)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_mbox *mbox;
 	uint64_t ctx;
 	ssize_t ret;
@@ -182,13 +181,25 @@ static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_a
 		return ERR_PTR(-EINVAL);
 	}
 
-	mbox = devm_kzalloc(dev, sizeof(struct mx_mbox), GFP_KERNEL);
+	mbox = kzalloc(sizeof(struct mx_mbox), GFP_KERNEL);
 	if (!mbox)
 		return ERR_PTR(-ENOMEM);
 
 	mx_mbox_init(mbox, ctx_addr, data_addr, ctx);
 
 	return mbox;
+}
+
+void mx_mbox_release_all(struct mx_pci_dev *mx_pdev)
+{
+	int qid;
+
+	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
+		kfree(mx_pdev->sq_mbox_list[qid]);
+		kfree(mx_pdev->cq_mbox_list[qid]);
+		mx_pdev->sq_mbox_list[qid] = NULL;
+		mx_pdev->cq_mbox_list[qid] = NULL;
+	}
 }
 
 static int reset_mx_mbox(struct mx_pci_dev *mx_pdev, struct mx_mbox *mbox)
@@ -267,7 +278,7 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	cq_mbox = create_mx_mbox(mx_pdev, mbox_info.cq_ctx_addr, mbox_info.cq_data_addr);
 	if (IS_ERR(cq_mbox)) {
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(sq_mbox);
 		return PTR_ERR(cq_mbox);
 	}
 
@@ -275,16 +286,16 @@ static long ioctl_register_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	mutex_lock(&mx_pdev->bar_map->lock);
 	if (mx_pdev->bar_map->count) {
 		mutex_unlock(&mx_pdev->bar_map->lock);
-		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(cq_mbox);
+		kfree(sq_mbox);
 		return -EBUSY;
 	}
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
 		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
 
 		mutex_unlock(&mx_pdev->bar_map->lock);
-		devm_kfree(&mx_pdev->pdev->dev, cq_mbox);
-		devm_kfree(&mx_pdev->pdev->dev, sq_mbox);
+		kfree(cq_mbox);
+		kfree(sq_mbox);
 		return matches ? 0 : -EINVAL;
 	}
 	mx_pdev->sq_mbox_list[mbox_info.qid] = sq_mbox;

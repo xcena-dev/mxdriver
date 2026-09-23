@@ -298,6 +298,55 @@ static inline void poll_backoff(unsigned int *idle_count)
 /******************************************************************************/
 /* Thread helpers                                                             */
 /******************************************************************************/
+void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const struct mx_queue_ops *ops)
+{
+	q->dev = &mx_pdev->pdev->dev;
+	q->mx_pdev = mx_pdev;
+	q->ops = ops;
+	spin_lock_init(&q->sq_lock);
+	INIT_LIST_HEAD(&q->sq_list);
+	init_swait_queue_head(&q->sq_wait);
+	init_swait_queue_head(&q->cq_wait);
+	atomic_set(&q->wait_count, 0);
+	atomic_set(&q->zombie_wait_count, 0);
+	atomic_set(&q->lv_health, MX_LIVENESS_ALIVE);
+	q->lv_progress_jiffies = jiffies;
+}
+
+/* Starts the submit/complete handlers on q and publishes it as the io queue. */
+int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q)
+{
+	int ret;
+
+	mx_pdev->submit_thread = kthread_run(mx_submit_handler, q, "mx_submit_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->submit_thread)) {
+		ret = PTR_ERR(mx_pdev->submit_thread);
+		pr_err("Failed to create submit thread (err=%d)\n", ret);
+		mx_pdev->submit_thread = NULL;
+		return ret;
+	}
+	/* SCHED_FIFO (lowest RT band) keeps the handlers ahead of CFS noise,
+	 * so a submission does not pay CFS wake latency on a busy box.
+	 * They sleep when idle and back off on a stalled device, never spinning. */
+	sched_set_fifo_low(mx_pdev->submit_thread);
+
+	mx_pdev->complete_thread = kthread_run(mx_complete_handler, q, "mx_complete_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->complete_thread)) {
+		ret = PTR_ERR(mx_pdev->complete_thread);
+		pr_err("Failed to create complete thread (err=%d)\n", ret);
+		kthread_stop(mx_pdev->submit_thread);
+		mx_pdev->submit_thread = NULL;
+		mx_pdev->complete_thread = NULL;
+		return ret;
+	}
+	sched_set_fifo_low(mx_pdev->complete_thread);
+
+	mx_pdev->io_queue = q;
+	mx_bind_handlers_to_numa(mx_pdev);
+
+	return 0;
+}
+
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
 {
 	int ret;

@@ -572,6 +572,8 @@ static void mx_transfer_wait_work(struct work_struct *work)
 	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
 
 	mx_transfer_wait(mx_pdev, transfer);
+	/* The submitter took this io_ref on our behalf before scheduling us. */
+	percpu_ref_put(&mx_pdev->io_ref);
 }
 
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
@@ -615,6 +617,7 @@ static ssize_t mx_transfer_submit_sg_one(struct mx_pci_dev *mx_pdev,
 			transfer->dir, transfer->size, true, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
+		percpu_ref_get(&mx_pdev->io_ref);
 		schedule_work(&transfer->work);
 		return size;
 	}
@@ -656,6 +659,7 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 	mx_transfer_queue_parallel(mx_pdev->io_queue, transfers, count);
 
 	if (nowait) {
+		percpu_ref_get_many(&mx_pdev->io_ref, count);
 		for (i = 0; i < count; i++)
 			schedule_work(&transfers[i]->work);
 		kfree(transfers);
@@ -718,8 +722,12 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_pci_dev *mx_pdev,
 static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_ctrl(transfer, opcode);
-	if (!transfer->command)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(transfer->command)) {
+		int ret = transfer->command ? PTR_ERR(transfer->command) : -ENOMEM;
+
+		transfer->command = NULL;
+		return ret;
+	}
 
 	transfer->mx_pdev = mx_pdev;
 	transfer->is_sg = false;
@@ -764,6 +772,7 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 			transfer->dir, transfer->size, false, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 	if (nowait) {
+		percpu_ref_get(&mx_pdev->io_ref);
 		schedule_work(&transfer->work);
 		return size;
 	}

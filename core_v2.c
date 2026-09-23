@@ -24,6 +24,8 @@ struct mx_queue_v2 {
 	dma_addr_t cq_dma_addr;
 
 	uint32_t depth;
+	/* True while the device can no longer write these rings; only then may they be freed. */
+	bool hw_quiet;
 	uint16_t last_sq_tail;
 	uint16_t last_cq_head;
 	uint16_t sq_tail;
@@ -317,25 +319,17 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
+	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
 		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
-	if (transfer->dir != DMA_TO_DEVICE)
-		return (void*)comm;
-
-	if (access_ok(transfer->user_addr, transfer->size)) {
-		if (copy_from_user(&comm->doorbell_value, transfer->user_addr, sizeof(uint64_t))) {
-			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
-					(uint64_t)&comm->doorbell_value, (uint64_t)transfer->user_addr);
-			return NULL;
-		}
-	} else {
-		comm->doorbell_value = *(uint64_t *)transfer->user_addr;
-	}
+	ret = mx_fill_ctrl_doorbell(transfer, &comm->doorbell_value);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return (void*)comm;
 }
@@ -343,16 +337,28 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 /******************************************************************************/
 /* Init                                                                       */
 /******************************************************************************/
+static void free_queue_rings(struct device *dev, struct mx_queue_v2 *queue)
+{
+	if (queue->sqes)
+		dma_free_coherent(dev, queue->depth * sizeof(struct mx_command), queue->sqes, queue->sq_dma_addr);
+	if (queue->cqes)
+		dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), queue->cqes, queue->cq_dma_addr);
+	queue->sqes = NULL;
+	queue->cqes = NULL;
+}
+
 static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q_depth)
 {
 	queue->depth = q_depth;
-	queue->cqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
+	queue->cqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
 	if (!queue->cqes)
 		return -ENOMEM;
 
-	queue->sqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
-	if (!queue->sqes)
+	queue->sqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
+	if (!queue->sqes) {
+		free_queue_rings(dev, queue);
 		return -ENOMEM;
+	}
 
 	pr_info("Allocated queue (depth=%u, sq_dma_addr=0x%llx, cq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
 			queue->depth, queue->sq_dma_addr, queue->cq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
@@ -364,8 +370,6 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 {
 	uint64_t __iomem *dbs = mx_pdev->bar + NVME_REG_DBS;
 
-	queue->common.dev = &mx_pdev->pdev->dev;
-	queue->common.mx_pdev = mx_pdev;
 	queue->qid = qid;
 	queue->sq_tail = 0;
 	queue->sq_head = 0;
@@ -380,7 +384,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
-	struct mx_queue_v2 *queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
 	uint32_t aqa;
 	int ret;
 
@@ -390,8 +394,10 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 		return -ENOMEM;
 
 	ret = alloc_queue(dev, queue, NVME_AQ_DEPTH);
-	if (ret)
+	if (ret) {
+		kfree(queue);
 		return ret;
+	}
 
 	aqa = queue->depth - 1;
 	aqa |= aqa << 16;
@@ -401,7 +407,12 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 
 	pr_info("Admin queue created (depth=%u)\n", queue->depth);
 
+	mx_queue_common_init(&queue->common, mx_pdev, NULL);
 	configure_queue(mx_pdev, queue, 0);
+	/* The device writes the admin CQ only to answer a command,
+	 * so only a sync admin command that times out can take this back;
+	 * there is no controller-disable step to revoke ASQ/ACQ at unbind. */
+	queue->hw_quiet = true;
 
 	mx_pdev->admin_queue = (struct mx_queue *)queue;
 
@@ -421,6 +432,7 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	}
 	if (count >= timeout) {
 		pr_err("Timeout waiting for pushable admin queue\n");
+		queue->hw_quiet = false;
 		return false;
 	}
 
@@ -435,9 +447,12 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	}
 	if (count >= timeout) {
 		pr_err("Timeout waiting for popable admin queue\n");
+		queue->hw_quiet = false;
 		return false;
 	}
 
+	/* v2 FW has no failure status for admin commands: it asserts on a bad one,
+	 * so a rejection surfaces above as a timeout. */
 	pop_mx_completion(queue, &cmpl);
 	ring_cq_doorbell(queue);
 
@@ -447,14 +462,58 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	return true;
 }
 
+/* NVMe order: a queue's SQ goes before its CQ.
+ * Returns false when a delete did not complete, so the rings must not go back to the allocator. */
+static bool delete_io_queue_on_device(struct mx_queue_v2 *admin_queue, bool sq_created, uint16_t sq_id,
+				      bool cq_created, uint16_t cq_id)
+{
+	struct mx_command comm = {};
+	bool released = true;
+
+	if (sq_created) {
+		comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
+		comm.io_queue_info.sq_id = sq_id;
+		if (!submit_sync_command(admin_queue, &comm, NULL)) {
+			pr_err("Failed to delete IO submission queue\n");
+			released = false;
+		}
+	}
+
+	if (cq_created) {
+		comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
+		comm.io_queue_info.cq_id = cq_id;
+		if (!submit_sync_command(admin_queue, &comm, NULL)) {
+			pr_err("Failed to delete IO completion queue\n");
+			released = false;
+		}
+	}
+
+	return released;
+}
+
+/* Rings the device may still write are leaked on purpose:
+ * a stale DMA target is worse than a leak on a device that already failed. */
+static void discard_queue(struct device *dev, struct mx_queue_v2 *queue, bool quiet)
+{
+	if (!quiet) {
+		pr_err("queue rings (sq=%pad cq=%pad) left allocated: the device may still own them\n",
+		       &queue->sq_dma_addr, &queue->cq_dma_addr);
+		return;
+	}
+
+	free_queue_rings(dev, queue);
+	kfree(queue);
+}
+
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
-	struct mx_queue_v2 *io_queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *io_queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
+	bool released = false;
 	int ret;
 
 	pr_info("Configuring IO queue...\n");
@@ -463,15 +522,18 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		return -ENOMEM;
 
 	ret = alloc_queue(dev, io_queue, 256);
-	if (ret)
+	if (ret) {
+		kfree(io_queue);
 		return ret;
+	}
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
 	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO completion queue\n");
-		return -EIO;
+		ret = -EIO;
+		goto err_discard;
 	}
 	cq_id = le16_to_cpu(result);
 
@@ -480,13 +542,17 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.io_queue_info.cq_id = cq_id;
 	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
-		return -EIO;
+		ret = -EIO;
+		/* The SQ may exist without an id to delete it by, so the rings stay. */
+		delete_io_queue_on_device(admin_queue, false, 0, true, cq_id);
+		goto err_discard;
 	}
 	sq_id = le16_to_cpu(result);
 
 	if (cq_id != sq_id) {
 		pr_err("Failed to create IO queue (cq_id=%d, sq_id=%d)\n", cq_id, sq_id);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_delete;
 	}
 
 	/* cq_id is device-supplied; its doorbell lives at bar + NVME_REG_DBS +
@@ -496,74 +562,39 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	    mx_pdev->bar_mapped_size) {
 		pr_err("IO queue id %u doorbell exceeds mapped BAR (%llu bytes)\n",
 		       cq_id, (unsigned long long)mx_pdev->bar_mapped_size);
-		return -EIO;
+		ret = -EIO;
+		goto err_delete;
 	}
 
 	pr_info("IO queue created (depth=%u, sq_id=%u, cq_id=%u)\n", io_queue->depth, sq_id, cq_id);
 
 	configure_queue(mx_pdev, io_queue, cq_id);
 
-	io_queue->common.ops = &v2_queue_ops;
-	spin_lock_init(&io_queue->common.sq_lock);
-	INIT_LIST_HEAD(&io_queue->common.sq_list);
-	init_swait_queue_head(&io_queue->common.sq_wait);
-	init_swait_queue_head(&io_queue->common.cq_wait);
-	atomic_set(&io_queue->common.wait_count, 0);
-	atomic_set(&io_queue->common.zombie_wait_count, 0);
-	atomic_set(&io_queue->common.lv_health, MX_LIVENESS_ALIVE);
-	io_queue->common.lv_progress_jiffies = jiffies;
-
-	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &io_queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
-	if (IS_ERR(mx_pdev->submit_thread)) {
-		ret = PTR_ERR(mx_pdev->submit_thread);
-		pr_err("Failed to create submit thread (err=%d)\n", ret);
-		mx_pdev->submit_thread = NULL;
-		return ret;
-	}
-	/* See core_v1.c: SCHED_FIFO (lowest RT band) for low scheduling latency. */
-	sched_set_fifo_low(mx_pdev->submit_thread);
-
-	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &io_queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
-	if (IS_ERR(mx_pdev->complete_thread)) {
-		ret = PTR_ERR(mx_pdev->complete_thread);
-		pr_err("Failed to create complete thread (err=%d)\n", ret);
-		kthread_stop(mx_pdev->submit_thread);
-		mx_pdev->submit_thread = NULL;
-		mx_pdev->complete_thread = NULL;
-		return ret;
-	}
-	sched_set_fifo_low(mx_pdev->complete_thread);
-
-	mx_pdev->io_queue = (struct mx_queue *)io_queue;
-
-	mx_bind_handlers_to_numa(mx_pdev);
+	mx_queue_common_init(&io_queue->common, mx_pdev, &v2_queue_ops);
+	ret = mx_start_io_queue(mx_pdev, &io_queue->common);
+	if (ret)
+		goto err_delete;
 
 	return 0;
+
+err_delete:
+	released = delete_io_queue_on_device(admin_queue, true, sq_id, true, cq_id);
+err_discard:
+	discard_queue(dev, io_queue, released);
+	return ret;
 }
 
 static int release_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
-	struct mx_command comm = {};
 
 	if (!admin_queue || !io_queue)
 		return 0;
 
-	/*
-	 * Tear down the device-side queues best-effort. submit_sync_command()
-	 * returns true on success and false on timeout (never -EAGAIN), so a
-	 * wedged device must not abort teardown before the kthreads are stopped.
-	 */
-	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
-	comm.io_queue_info.cq_id = io_queue->qid;
-	if (!submit_sync_command(admin_queue, &comm, NULL))
-		pr_err("Failed to delete IO completion queue\n");
-
-	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
-	comm.io_queue_info.sq_id = io_queue->qid;
-	if (!submit_sync_command(admin_queue, &comm, NULL))
-		pr_err("Failed to delete IO submission queue\n");
+	/* Best-effort: a wedged device must not abort teardown before the kthreads are stopped.
+	 * free_mx_queue() reads the outcome to decide about the rings. */
+	io_queue->hw_quiet = delete_io_queue_on_device(admin_queue, true, io_queue->qid, true, io_queue->qid);
 
 	/*
 	 * Must run unconditionally: the submit/complete kthreads dereference the
@@ -611,10 +642,29 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+static void free_mx_queue(struct mx_pci_dev *mx_pdev)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue_v2 *queue;
+
+	queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
+	if (queue) {
+		discard_queue(dev, queue, queue->hw_quiet);
+		mx_pdev->io_queue = NULL;
+	}
+
+	queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
+	if (queue) {
+		discard_queue(dev, queue, queue->hw_quiet);
+		mx_pdev->admin_queue = NULL;
+	}
+}
+
 void register_mx_ops_v2(struct mx_operations *ops)
 {
 	ops->init_queue =  init_mx_queue;
 	ops->release_queue = release_mx_queue;
+	ops->free_queue = free_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 }

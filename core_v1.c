@@ -262,25 +262,17 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
+	int ret;
 
 	comm = alloc_mx_command(transfer, opcode);
 	if (!comm) {
 		pr_warn("Failed to allocate mx_command\n");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
-	if (transfer->dir != DMA_TO_DEVICE)
-		return (void*)comm;
-
-	if (access_ok(transfer->user_addr, transfer->size)) {
-		if (copy_from_user(&comm->doorbell_value, transfer->user_addr, sizeof(uint64_t))) {
-			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
-					(uint64_t)&comm->doorbell_value, (uint64_t)transfer->user_addr);
-			return NULL;
-		}
-	} else {
-		comm->doorbell_value = *(uint64_t *)transfer->user_addr;
-	}
+	ret = mx_fill_ctrl_doorbell(transfer, &comm->doorbell_value);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return (void*)comm;
 }
@@ -314,14 +306,14 @@ static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopc
 
 static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v1 *queue;
 	void __iomem *host_mbox_base, *hifc_mbox_base;
 	void __iomem *ctx_addr, *data_addr;
 	uint64_t q_offset;
 	uint64_t ctx;
+	int ret;
 
-	queue = devm_kzalloc(dev, sizeof(struct mx_queue_v1), GFP_KERNEL);
+	queue = kzalloc(sizeof(struct mx_queue_v1), GFP_KERNEL);
 	if (!queue) {
 		pr_err("Failed to allocate memory for mx_queue_v1\n");
 		return -ENOMEM;
@@ -339,7 +331,8 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	ctx = readq(ctx_addr);
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_free;
 	}
 	mx_mbox_init(&queue->sq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
@@ -348,56 +341,21 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	ctx = readq(ctx_addr);
 	if (ctx == ULLONG_MAX) {
 		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_free;
 	}
 	mx_mbox_init(&queue->cq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
-	queue->common.dev = dev;
-	queue->common.mx_pdev = mx_pdev;
-	queue->common.ops = &v1_queue_ops;
-	spin_lock_init(&queue->common.sq_lock);
-	INIT_LIST_HEAD(&queue->common.sq_list);
-	init_swait_queue_head(&queue->common.sq_wait);
-	init_swait_queue_head(&queue->common.cq_wait);
-	atomic_set(&queue->common.wait_count, 0);
-	atomic_set(&queue->common.zombie_wait_count, 0);
-	atomic_set(&queue->common.lv_health, MX_LIVENESS_ALIVE);
-	queue->common.lv_progress_jiffies = jiffies;
-
-	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
-	if (IS_ERR(mx_pdev->submit_thread)) {
-		int ret = PTR_ERR(mx_pdev->submit_thread);
-
-		pr_err("Failed to create submit thread (err=%d)\n", ret);
-		mx_pdev->submit_thread = NULL;
-		return ret;
-	}
-	/*
-	 * SCHED_FIFO (lowest RT band) keeps the handler ahead of CFS noise so
-	 * a userspace I/O submission doesn't pay CFS wake latency when the box
-	 * is busy.  Handlers sleep in swait_event_timeout when idle and
-	 * usleep_range in poll_backoff when hardware is unresponsive, so
-	 * softlockup/RCU stalls are not a concern.
-	 */
-	sched_set_fifo_low(mx_pdev->submit_thread);
-
-	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
-	if (IS_ERR(mx_pdev->complete_thread)) {
-		int ret = PTR_ERR(mx_pdev->complete_thread);
-
-		pr_err("Failed to create complete thread (err=%d)\n", ret);
-		kthread_stop(mx_pdev->submit_thread);
-		mx_pdev->submit_thread = NULL;
-		mx_pdev->complete_thread = NULL;
-		return ret;
-	}
-	sched_set_fifo_low(mx_pdev->complete_thread);
-
-	mx_pdev->io_queue = (struct mx_queue *)queue;
-
-	mx_bind_handlers_to_numa(mx_pdev);
+	mx_queue_common_init(&queue->common, mx_pdev, &v1_queue_ops);
+	ret = mx_start_io_queue(mx_pdev, &queue->common);
+	if (ret)
+		goto err_free;
 
 	return 0;
+
+err_free:
+	kfree(queue);
+	return ret;
 }
 
 static int release_mx_queue(struct mx_pci_dev *mx_pdev)
@@ -406,10 +364,17 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+static void free_mx_queue(struct mx_pci_dev *mx_pdev)
+{
+	kfree(mx_pdev->io_queue);
+	mx_pdev->io_queue = NULL;
+}
+
 void register_mx_ops_v1(struct mx_operations *ops)
 {
 	ops->init_queue =  init_mx_queue;
 	ops->release_queue = release_mx_queue;
+	ops->free_queue = free_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 	ops->create_command_passthru = create_mx_command_passthru;

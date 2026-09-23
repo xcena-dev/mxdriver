@@ -26,6 +26,7 @@
 #include <linux/kref.h>
 #include <linux/kthread.h>
 #include <linux/numa.h>
+#include <linux/percpu-refcount.h>
 #include <linux/pm_qos.h>
 #include <linux/poll.h>
 #include <linux/refcount.h>
@@ -34,6 +35,7 @@
 #include <linux/swait.h>
 #include <linux/timekeeping.h>
 #include <linux/topology.h>
+#include <linux/uaccess.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -322,9 +324,13 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
+	/* Frees what init_queue allocated,
+	 * once release_queue has stopped everything that used it. */
+	void (*free_queue) (struct mx_pci_dev *);
 	/* Returns the command, or ERR_PTR(-errno) — notably -EINVAL for a layout no PRP list can
 	 * express, which the caller must not mistake for memory pressure. */
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
+	/* Returns the command, or ERR_PTR(-errno). */
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
 } __randomize_layout;
@@ -345,6 +351,10 @@ struct mx_pci_dev {
 	/* Not devm: open files and BAR VMAs outlive the PCI unbind.
 	 * Held once by probe and once per character device. */
 	struct kref ref;
+	/* Held by every running fops body and every queued nowait wait-work;
+	 * teardown kills it and waits for zero before freeing the queues and mailboxes they use. */
+	struct percpu_ref io_ref;
+	wait_queue_head_t io_quiesce_wq;
 	int dev_id;
 	dev_t dev_no;
 
@@ -460,7 +470,29 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
  * See core_common.c. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
 
+void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const struct mx_queue_ops *ops);
+int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q);
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
+
+/* Ctrl writes carry their payload inline in the command's doorbell slot. */
+static inline int mx_fill_ctrl_doorbell(struct mx_transfer *transfer, uint64_t *doorbell)
+{
+	if (transfer->dir != DMA_TO_DEVICE)
+		return 0;
+
+	if (access_ok(transfer->user_addr, transfer->size)) {
+		if (copy_from_user(doorbell, transfer->user_addr, sizeof(*doorbell))) {
+			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
+					(uint64_t)doorbell, (uint64_t)transfer->user_addr);
+			return -EFAULT;
+		}
+	} else {
+		*doorbell = *(uint64_t *)transfer->user_addr;
+	}
+
+	return 0;
+}
+
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
 
@@ -530,3 +562,4 @@ uint32_t get_pending_count(struct mx_mbox *mbox);
 uint8_t get_next_index(uint8_t _index, uint32_t count, uint32_t depth);
 uint32_t get_data_offset(uint8_t _db);
 void mx_mbox_init(struct mx_mbox *mbox, uint64_t ctx_addr, uint64_t data_addr, uint64_t ctx);
+void mx_mbox_release_all(struct mx_pci_dev *mx_pdev);
