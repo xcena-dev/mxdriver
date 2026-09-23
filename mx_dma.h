@@ -286,6 +286,10 @@ struct mx_completion_info {
 
 struct mx_queue_ops {
 	bool (*is_pushable)(struct mx_queue *q);
+	/*
+	 * command may live inside the transfer, which the device's completion can
+	 * free as soon as the command is published: copy it out before publishing.
+	 */
 	void (*push_command)(struct mx_queue *q, void *command);
 	void (*post_submit)(struct mx_queue *q);
 

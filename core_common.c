@@ -374,6 +374,8 @@ int mx_submit_handler(void *arg)
 	unsigned int idle_count = 0;
 	bool pushed_any;
 	bool lv_on;
+	bool no_completion;
+	void *command;
 
 	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(q->sq_wait,
@@ -390,13 +392,20 @@ int mx_submit_handler(void *arg)
 			if (!ops->is_pushable(q))
 				break;
 
-			ops->push_command(q, transfer->command);
+			no_completion = transfer->no_completion;
+			command = transfer->command;
 			list_del_init(&transfer->entry);
+			trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
+			if (!no_completion && atomic_inc_return(&q->wait_count) == 1)
+				WRITE_ONCE(q->lv_progress_jiffies, jiffies);
+			/*
+			 * Once the command is visible to the device its completion can
+			 * free the transfer, so nothing may touch it after the push.
+			 */
+			ops->push_command(q, command);
 			pushed_any = true;
 
-			trace_mx_dma_xfer_submit((u32)transfer->id, transfer->no_completion);
-
-			if (transfer->no_completion) {
+			if (no_completion) {
 				/*
 				 * HW guarantees no completion entry for passthru
 				 * commands with no_completion set.  Signal the
@@ -405,8 +414,6 @@ int mx_submit_handler(void *arg)
 				 */
 				complete(&transfer->done);
 			} else {
-				if (atomic_inc_return(&q->wait_count) == 1)
-					WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 				swake_up_one(&q->cq_wait);
 			}
 		}
