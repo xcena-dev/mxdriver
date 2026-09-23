@@ -237,6 +237,26 @@ TRACE_EVENT(mx_dma_xfer_submit,
 		__entry->no_completion)
 );
 
+/* Emitted only after the queue's post_submit hook has completed. For v2 this
+ * is after the SQ tail doorbell write; v1 publishes each command directly in
+ * push_command and has no separate hook. Together with the preceding ordered
+ * submit events this marks a batch as hardware-visible. */
+TRACE_EVENT(mx_dma_xfer_post_submit,
+	TP_PROTO(int dev_id, u32 pushed_count),
+	TP_ARGS(dev_id, pushed_count),
+	TP_STRUCT__entry(
+		__field(int, dev_id)
+		__field(u32, pushed_count)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id;
+		__entry->pushed_count = pushed_count;
+	),
+	TP_printk("dev=%d pushed=%u",
+		__entry->dev_id,
+		__entry->pushed_count)
+);
+
 TRACE_EVENT(mx_dma_xfer_complete,
 	TP_PROTO(u32 xfer_id, u8 status, u64 result, bool is_zombie),
 	TP_ARGS(xfer_id, status, result, is_zombie),

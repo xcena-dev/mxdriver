@@ -25,20 +25,26 @@
 #include <linux/aer.h>
 #include <linux/kref.h>
 #include <linux/kthread.h>
+#include <linux/kref.h>
 #include <linux/numa.h>
 #include <linux/percpu-refcount.h>
 #include <linux/pm_qos.h>
 #include <linux/poll.h>
+#include <linux/path.h>
 #include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/scatterlist.h>
 #include <linux/swait.h>
 #include <linux/timekeeping.h>
 #include <linux/topology.h>
+#include <linux/percpu-refcount.h>
 #include <linux/uaccess.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
+
+#include "include/uapi/mx_dma_lease.h"
+#include "lease_sm.h"
 
 #ifndef CONFIG_WO_CXL
 #define MEM_NAME_LEN		(3)
@@ -99,7 +105,7 @@ enum {
 	NUM_OF_MX_CDEV,
 };
 
-static const char * const node_name[] = {
+static const char * const node_name[] __maybe_unused = {
 	MXDMA_NODE_NAME "%d_data",
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
@@ -129,7 +135,7 @@ enum {
 	IO_OPCODE_PING,
 };
 
-static const char * const mxdma_op_name[] = {
+static const char * const mxdma_op_name[] __maybe_unused = {
 	"R_DATA(0)",
 	"W_DATA(1)",
 	"R_CTX(2)",
@@ -174,16 +180,6 @@ typedef union {
 	uint64_t u64;
 } mbox_context_t;
 
-#ifndef CONFIG_WO_CXL
-/* One registry entry per XCENA PCI device we have attached to.  In CXL mode the
- * bound driver is cxl_pci, so this list -- not the device's driver_data -- is
- * what maps a struct pci_dev back to our per-device state. */
-struct mx_device_node {
-	struct mx_pci_dev *mx_pdev;
-	struct list_head node;
-};
-#endif
-
 struct mx_mbox {
 	uint64_t r_ctx_addr;
 	uint64_t w_ctx_addr;
@@ -217,6 +213,8 @@ struct mx_sg_context {
 	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
 };
 
+struct mx_file_ctx;
+
 struct mx_transfer {
 	int id;
 	void __user *user_addr;		/* ctrl/passthru target; NULL for SG transfers */
@@ -225,6 +223,11 @@ struct mx_transfer {
 	enum dma_data_direction dir;
 
 	struct mx_pci_dev *mx_pdev;
+	/* The issuing OFD and both userspace reclamation proofs remain live until
+	 * this command reaches a terminal/recovered state. */
+	struct mx_file_ctx *owner_ctx;
+	struct file *slot_proof_file;
+	struct file *lifetime_proof_file;
 	struct work_struct work;
 
 	void *command;
@@ -273,9 +276,63 @@ struct mx_char_dev {
 	 * and its release drops the mx_pci_dev reference it holds. */
 	struct device dev;
 	dev_t cdev_no;
+	int type;
 
 	bool nowait;
 	bool enabled;
+};
+
+#define MAGIC_FILE_CTX		0x46494c454354584dUL
+
+struct mx_device_lease {
+	struct mutex lock;
+	struct mx_lease_sm state;
+	/* A path reference pins inode+dentry+mount identity without retaining the
+	 * publisher's open file description (and therefore without retaining its
+	 * OFD locks after process exit).
+	 */
+	struct path state_path;
+	bool state_path_valid;
+	struct inode *state_inode;
+	struct path slot_domain_path;
+	bool slot_domain_path_valid;
+	struct inode *slot_domain_inode;
+	u64 state_identity[2];
+	u32 state_family;
+	u64 device_incarnation;
+	u64 generation_counter;
+	u64 generation;
+	bool removed;
+};
+
+struct mx_file_ctx {
+	unsigned long magic;
+	refcount_t refs;
+	struct mx_char_dev *mx_cdev;
+	struct mx_pci_dev *mx_pdev;
+	struct mx_lease_sm_holder lease;
+	struct file *slot_source_file;
+	struct file *slot_proof_file;
+	struct file *lifetime_source_file;
+	struct file *lifetime_proof_file;
+	u64 proof_lifetime_tag;
+	u32 proof_slot;
+	u32 transfer_count;
+	u32 direct_count;
+	u32 bar_mapping_count; /* shared VMA objects, including forked survivors */
+	bool proofs_ever_bound;
+};
+
+struct mx_bar_map;
+
+/* One per mmap() call, shared by every VMA fork/split makes from it. It pins
+ * the owning file context (so the lease keeps seeing the mapper) and the
+ * device (so the lease lock is valid in vm_close) until the last copy closes. */
+struct mx_bar_vma {
+	struct mx_bar_map *bar_map;
+	struct mx_pci_dev *mx_pdev;
+	struct mx_file_ctx *owner_ctx;
+	refcount_t refs;
 };
 
 struct mx_queue;
@@ -324,6 +381,7 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
+	int (*recover_queue) (struct mx_pci_dev *);
 	/* Frees what init_queue allocated,
 	 * once release_queue has stopped everything that used it. */
 	void (*free_queue) (struct mx_pci_dev *);
@@ -359,7 +417,33 @@ struct mx_pci_dev {
 	dev_t dev_no;
 
 	struct pci_dev *pdev;
+	struct list_head registry_entry;
 	bool enabled;
+	struct mx_device_lease lease;
+	char bdf[32];
+	bool chrdev_region_allocated;
+	bool bar_region_requested;
+	bool queues_initialized;
+	bool msi_enabled_by_driver;
+	bool dma_reclaim_safe;
+	bool queue_dma_programmed;
+	bool protocol_poisoned;
+	bool teardown_started;
+	bool module_ref_held;
+	bool pci_ref_held;
+	bool pci_enabled_by_driver;
+	bool bus_master_enabled_by_driver;
+	bool readrq_changed;
+	bool dma_mask_changed;
+	bool coherent_dma_mask_changed;
+	bool max_seg_size_changed;
+	bool min_align_mask_changed;
+	int saved_readrq;
+	u64 saved_dma_mask;
+	u64 saved_coherent_dma_mask;
+	unsigned int saved_max_seg_size;
+	unsigned int saved_min_align_mask;
+	int attach_error;
 
 	/* Per-device liveness watchdog config, exposed under the liveness/ sysfs
 	 * group. Off by default; a host service enables it only on ping-capable FW. */
@@ -371,9 +455,9 @@ struct mx_pci_dev {
 	void __iomem *bar;
 	resource_size_t bar_mapped_size;
 
-	bool bar_requested;
+	/* Set once request_threaded_irq() succeeds so teardown only frees an IRQ
+	 * that was actually requested. */
 	bool irq_requested;
-	bool msi_enabled_by_us;
 
 	struct mx_bar_map *bar_map;
 
@@ -393,6 +477,7 @@ struct mx_pci_dev {
 
 	struct task_struct *submit_thread;
 	struct task_struct *complete_thread;
+	struct workqueue_struct *async_wq;
 
 	int num_of_cdev;
 	struct mx_char_dev mx_cdev[NUM_OF_MX_CDEV];
@@ -423,26 +508,45 @@ extern const struct file_operations *mxdma_fops_array[];
 extern struct kmem_cache *mx_transfer_cache;
 
 int transfer_id_alloc(void *ptr);
-void transfer_id_free(unsigned long id);
-void *find_transfer_by_id(unsigned long id);
+void transfer_id_free(struct mx_transfer *transfer);
+struct mx_transfer *transfer_id_claim_completion(unsigned long id,
+						 unsigned long *flags);
+void transfer_id_complete_unlock(unsigned long flags);
 int zombie_cleanup_handler(void *data);
 
-ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_data_from_device_parallel(struct mx_file_ctx *ctx, char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t write_data_to_device_parallel(struct mx_file_ctx *ctx, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_data_from_device(struct mx_file_ctx *ctx, char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t write_data_to_device(struct mx_file_ctx *ctx, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_ctrl_from_device(struct mx_file_ctx *ctx, char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t write_ctrl_to_device(struct mx_file_ctx *ctx, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg);
+long ioctl_to_device(struct mx_file_ctx *ctx, unsigned int cmd, unsigned long arg);
+bool mx_ioctl_is_direct_cmd(unsigned int cmd);
+void mx_free_registered_mboxes(struct mx_pci_dev *mx_pdev);
 
-long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
-			    uint64_t device_addr, uint64_t size, bool no_completion,
-			    uint8_t *out_status, uint64_t *out_host_addr);
+bool mx_pdev_get_live(struct mx_pci_dev *mx_pdev);
+void mx_pdev_put(struct mx_pci_dev *mx_pdev);
+void mx_lease_init(struct mx_pci_dev *mx_pdev);
+void mx_lease_mark_removed(struct mx_pci_dev *mx_pdev);
+void mx_file_ctx_get(struct mx_file_ctx *ctx);
+void mx_file_ctx_put(struct mx_file_ctx *ctx);
+int mx_lease_transfer_get(struct mx_file_ctx *ctx, struct mx_transfer *transfer);
+void mx_lease_transfer_put(struct mx_transfer *transfer);
+bool mx_lease_ioctl_cmd(unsigned int cmd);
+long mx_lease_ioctl(struct mx_file_ctx *ctx, unsigned int cmd, unsigned long arg);
+int mx_lease_direct_begin(struct mx_file_ctx *ctx);
+void mx_lease_direct_end(struct mx_file_ctx *ctx);
+int mx_lease_authorize_no_completion(struct mx_file_ctx *ctx);
+int mx_lease_authorize_memory_cmd(struct mx_file_ctx *ctx, u16 subopcode);
 
-ssize_t submit_protocol_transfer(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, int opcode);
+long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
+				    uint64_t device_addr, uint64_t size, bool no_completion,
+				    uint8_t *out_status, uint64_t *out_host_addr);
+
+ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf, size_t size, int opcode);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
@@ -549,7 +653,8 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 
 struct mx_bar_map *mx_bar_map_alloc(void);
 void mx_bar_map_put(struct mx_bar_map *bar_map);
-int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma);
+int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
+		struct vm_area_struct *vma);
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
@@ -562,4 +667,3 @@ uint32_t get_pending_count(struct mx_mbox *mbox);
 uint8_t get_next_index(uint8_t _index, uint32_t count, uint32_t depth);
 uint32_t get_data_offset(uint8_t _db);
 void mx_mbox_init(struct mx_mbox *mbox, uint64_t ctx_addr, uint64_t data_addr, uint64_t ctx);
-void mx_mbox_release_all(struct mx_pci_dev *mx_pdev);

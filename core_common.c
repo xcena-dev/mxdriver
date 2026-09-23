@@ -6,6 +6,7 @@
 #include "trace.h"
 #else
 #define trace_mx_dma_xfer_submit(xfer_id, no_completion)			do { } while (0)
+#define trace_mx_dma_xfer_post_submit(dev_id, pushed_count)			do { } while (0)
 #define trace_mx_dma_xfer_complete(xfer_id, status, result, is_zombie)		do { } while (0)
 #define trace_mx_dma_xfer_complete_orphan(xfer_id, status, result)		do { } while (0)
 #endif
@@ -356,12 +357,14 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
 		if (ret)
 			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
+	mx_pdev->submit_thread = NULL;
 
 	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
 		ret = kthread_stop(mx_pdev->complete_thread);
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
+	mx_pdev->complete_thread = NULL;
 }
 
 /******************************************************************************/
@@ -421,7 +424,7 @@ int mx_submit_handler(void *arg)
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 	unsigned int idle_count = 0;
-	bool pushed_any;
+	unsigned int pushed_count;
 	bool lv_on;
 	bool no_completion;
 	void *command;
@@ -431,7 +434,7 @@ int mx_submit_handler(void *arg)
 				!list_empty(&q->sq_list),
 				POLLING_INTERVAL_MSEC);
 
-		pushed_any = false;
+		pushed_count = 0;
 		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		spin_lock_irqsave(&q->sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
@@ -444,6 +447,9 @@ int mx_submit_handler(void *arg)
 			no_completion = transfer->no_completion;
 			command = transfer->command;
 			list_del_init(&transfer->entry);
+			no_completion = transfer->no_completion;
+			command = transfer->command;
+			list_del_init(&transfer->entry);
 			trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
 			if (!no_completion && atomic_inc_return(&q->wait_count) == 1)
 				WRITE_ONCE(q->lv_progress_jiffies, jiffies);
@@ -452,7 +458,7 @@ int mx_submit_handler(void *arg)
 			 * free the transfer, so nothing may touch it after the push.
 			 */
 			ops->push_command(q, command);
-			pushed_any = true;
+			pushed_count++;
 
 			if (no_completion) {
 				/*
@@ -472,8 +478,11 @@ int mx_submit_handler(void *arg)
 
 		if (ops->post_submit)
 			ops->post_submit(q);
+		if (pushed_count)
+			trace_mx_dma_xfer_post_submit(q->mx_pdev->dev_id,
+						      pushed_count);
 
-		if (pushed_any)
+		if (pushed_count)
 			idle_count = 0;
 		else
 			poll_backoff(&idle_count);
@@ -488,6 +497,7 @@ int mx_complete_handler(void *arg)
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer;
 	struct mx_completion_info info;
+	unsigned long id_flags;
 	unsigned int idle_count = 0;
 
 	while (!kthread_should_stop()) {
@@ -519,7 +529,7 @@ int mx_complete_handler(void *arg)
 			/* Any normal completion also ends the verify window — resume held submits. */
 			atomic_set(&q->lv_inflight, 0);
 
-			transfer = find_transfer_by_id(info.id);
+			transfer = transfer_id_claim_completion(info.id, &id_flags);
 			if (!transfer) {
 				trace_mx_dma_xfer_complete_orphan((u32)info.id, info.status, info.result);
 				dev_warn_ratelimited(q->dev,
@@ -530,21 +540,19 @@ int mx_complete_handler(void *arg)
 			trace_mx_dma_xfer_complete((u32)info.id, info.status, info.result,
 					READ_ONCE(transfer->is_zombie));
 
-			/*
-			 * Claim wait_count decrement — prevents double decrement
-			 * if zombie_cleanup races with this completion.
-			 */
-			if (atomic_cmpxchg(&transfer->wait_claimed, 0, 1) != 0)
-				continue;
-
 			atomic_dec(&q->wait_count);
 
-			if (READ_ONCE(transfer->is_zombie))
+			if (READ_ONCE(transfer->is_zombie)) {
+				transfer_id_complete_unlock(id_flags);
 				continue;
+			}
 
 			transfer->result = info.result;
 			transfer->status = info.status;
 			complete(&transfer->done);
+			/* The waiter/cleaner serializes its final free on id_lock.
+			 * Do not touch transfer after releasing completion ownership. */
+			transfer_id_complete_unlock(id_flags);
 		}
 
 		if (ops->post_complete)
@@ -589,20 +597,27 @@ void mx_bar_map_put(struct mx_bar_map *bar_map)
 	kref_put(&bar_map->kref, mx_bar_map_release);
 }
 
-/* Account for VMAs created by fork or a split. */
+/* Account for VMAs created by fork or a split. They share the bar_vma of the
+ * mmap() they descend from, so the lease keeps charging the original mapper. */
 static void mx_bar_vma_open(struct vm_area_struct *vma)
 {
-	struct mx_bar_map *bar_map = vma->vm_private_data;
+	struct mx_bar_vma *bar_vma = vma->vm_private_data;
+	struct mx_bar_map *bar_map = bar_vma->bar_map;
 
 	mutex_lock(&bar_map->lock);
 	kref_get(&bar_map->kref);
 	bar_map->count++;
+	refcount_inc(&bar_vma->refs);
 	mutex_unlock(&bar_map->lock);
 }
 
 static void mx_bar_vma_close(struct vm_area_struct *vma)
 {
-	struct mx_bar_map *bar_map = vma->vm_private_data;
+	struct mx_bar_vma *bar_vma = vma->vm_private_data;
+	struct mx_bar_map *bar_map = bar_vma->bar_map;
+	struct mx_pci_dev *mx_pdev = bar_vma->mx_pdev;
+	struct mx_file_ctx *owner_ctx = bar_vma->owner_ctx;
+	bool last;
 
 	mutex_lock(&bar_map->lock);
 	if (!WARN_ON_ONCE(!bar_map->count)) {
@@ -611,7 +626,20 @@ static void mx_bar_vma_close(struct vm_area_struct *vma)
 		if (!bar_map->count)
 			bar_map->mapping = NULL;
 	}
+	last = refcount_dec_and_test(&bar_vma->refs);
 	mutex_unlock(&bar_map->lock);
+
+	if (last) {
+		/* The lease counts mmap() objects, not fork copies: the mapper is
+		 * released only when the last copy of this mapping is gone. */
+		mutex_lock(&mx_pdev->lease.lock);
+		if (!WARN_ON_ONCE(!owner_ctx->bar_mapping_count))
+			owner_ctx->bar_mapping_count--;
+		mutex_unlock(&mx_pdev->lease.lock);
+		kfree(bar_vma);
+		mx_file_ctx_put(owner_ctx);
+		mx_pdev_put(mx_pdev);
+	}
 
 	/* The final put destroys the mutex. */
 	mx_bar_map_put(bar_map);
@@ -623,13 +651,19 @@ static const struct vm_operations_struct mx_bar_vm_ops = {
 };
 
 /* dev_map() derives the BAR base and size from PCI resources. */
-int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma)
+int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
+		struct vm_area_struct *vma)
 {
 	struct mx_bar_map *bar_map = mx_pdev->bar_map;
+	struct mx_bar_vma *bar_vma;
 	resource_size_t vm_size;
 	unsigned long pfn;
 	uint32_t qid;
 	int ret;
+
+	bar_vma = kzalloc(sizeof(*bar_vma), GFP_KERNEL);
+	if (!bar_vma)
+		return -ENOMEM;
 
 	mutex_lock(&bar_map->lock);
 
@@ -671,22 +705,50 @@ int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct vm_area_struct *vma)
 	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 #endif
 
-	/* Userspace must leave driver-owned regions in the full-BAR mapping untouched. */
+	/* Userspace must leave driver-owned regions in the full-BAR mapping untouched.
+	 * That includes the qid-48 HIO region the driver's own submit/complete
+	 * threads drive: that kernel-owned context stays live, so a BAR mapper is
+	 * trusted not to touch it. */
 	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
+
+	mutex_lock(&mx_pdev->lease.lock);
+	if (ctx->bar_mapping_count == U32_MAX) {
+		mutex_unlock(&mx_pdev->lease.lock);
+		ret = -EOVERFLOW;
+		goto out_unlock;
+	}
+	mutex_unlock(&mx_pdev->lease.lock);
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
 				 vma->vm_page_prot);
 	if (!ret) {
 		/* All BAR mappings through this cdev share one address_space. */
 		bar_map->mapping = vma->vm_file->f_mapping;
-		vma->vm_private_data = bar_map;
+		/* The VMA may outlive the character-device file. Keep its file context
+		 * alive so the lease holder remains visible until the last forked VMA
+		 * closes; otherwise close(fd) would let a sandbox lease coexist with a
+		 * legacy process that can still write the BAR. */
+		mx_file_ctx_get(ctx);
+		bar_vma->owner_ctx = ctx;
+		mutex_lock(&mx_pdev->lease.lock);
+		ctx->bar_mapping_count++;
+		mutex_unlock(&mx_pdev->lease.lock);
+		/* One device reference follows the shared bar_vma across fork and is
+		 * dropped by the last vm_close(); the lease lock it takes lives there. */
+		kref_get(&mx_pdev->ref);
+		bar_vma->mx_pdev = mx_pdev;
+		bar_vma->bar_map = bar_map;
+		refcount_set(&bar_vma->refs, 1);
+		vma->vm_private_data = bar_vma;
 		vma->vm_ops = &mx_bar_vm_ops;
 		/* vm_ops->open is not called for the initial VMA. */
 		kref_get(&bar_map->kref);
 		bar_map->count++;
+		bar_vma = NULL;
 	}
 
 out_unlock:
 	mutex_unlock(&bar_map->lock);
+	kfree(bar_vma);
 	return ret;
 }

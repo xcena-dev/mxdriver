@@ -379,4 +379,3 @@ void register_mx_ops_v1(struct mx_operations *ops)
 	ops->create_command_ctrl = create_mx_command_ctrl;
 	ops->create_command_passthru = create_mx_command_passthru;
 }
-
