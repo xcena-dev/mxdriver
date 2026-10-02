@@ -371,31 +371,65 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
 /* Unified submit/complete handlers                                           */
 /******************************************************************************/
 /*
- * Transport liveness watchdog. Runs in the submit thread (never blocks) while
- * IO is outstanding: probes a stalled queue with a fire-and-forget ping and
- * marks the transport DEAD when neither completions nor a pong arrive in time.
+ * Time since the last completion. The complete thread may publish a stamp
+ * newer than the jiffies read here; time_after() turns that into 0 instead of
+ * an unsigned wrap that would look like a huge stall.
+ */
+static unsigned long mx_liveness_stalled_ms(struct mx_queue *q)
+{
+	unsigned long progress = READ_ONCE(q->lv_progress_jiffies);
+	unsigned long now = jiffies;
+
+	return time_after(now, progress) ? jiffies_to_msecs(now - progress) : 0;
+}
+
+/*
+ * Transport liveness watchdog. Runs in the submit thread (never blocks): probes
+ * a queue stalled with IO outstanding using a fire-and-forget ping, and marks
+ * the transport DEAD when neither completions nor a pong arrive in time.
  */
 static void mx_liveness_watchdog(struct mx_queue *q)
 {
 	struct mx_pci_dev *mx_pdev = q->mx_pdev;
-	unsigned long now = jiffies;
 	int outstanding = atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
 	/* Snapshot + sanitize sysfs-writable params: keep 1 <= stall < dead so a probe
 	 * is always attempted before the no-completion DEAD verdict fires. */
 	unsigned int dead_ms = max(READ_ONCE(mx_pdev->liveness_dead_ms), 2u);
 	unsigned int stall_ms = clamp(READ_ONCE(mx_pdev->liveness_stall_ms), 1u, dead_ms - 1);
 	unsigned long stalled_ms;
+	u64 pong_wait_ns;
+
+	/* Probe outstanding with no pong past the dead budget: dead. Checked before
+	 * the idle return, since the probe may outlive the last command. */
+	pong_wait_ns = ktime_get_ns() - READ_ONCE(q->lv_sent_ns);
+	if (atomic_read(&q->lv_inflight) &&
+	    pong_wait_ns > (u64)dead_ms * NSEC_PER_MSEC) {
+		/* cmpxchg from SUSPECT so a pong that just resolved the window
+		 * (ALIVE) is not clobbered. */
+		atomic_cmpxchg(&q->lv_health, MX_LIVENESS_SUSPECT, MX_LIVENESS_DEAD);
+		/* Re-probe rather than release the hold, so held submits never
+		 * reach a dead device; a full SQ keeps the hold and retries. */
+		if (q->ops->is_pushable(q)) {
+			dev_warn_ratelimited(q->dev,
+				"liveness: no pong for %llu ms (outstanding=%d), re-probing\n",
+				pong_wait_ns / NSEC_PER_MSEC, outstanding);
+			WRITE_ONCE(q->lv_sent_ns, ktime_get_ns());
+			q->ops->build_ping_command(q->lv_ping_cmd);
+			q->ops->push_command(q, q->lv_ping_cmd);
+		}
+		return;
+	}
 
 	if (outstanding <= 0)
 		return;
 
-	stalled_ms = jiffies_to_msecs(now - READ_ONCE(q->lv_progress_jiffies));
+	stalled_ms = mx_liveness_stalled_ms(q);
 
 	/* No completion for too long, no probe in flight: dead (SQ-stuck case where
 	 * a probe cannot even be pushed; an in-flight probe has its own pong budget
-	 * below). Progress re-sampled to narrow race vs lock-free ALIVE write. */
+	 * above). Progress re-sampled to narrow race vs lock-free ALIVE write. */
 	if (stalled_ms > dead_ms && atomic_read(&q->lv_inflight) == 0 &&
-	    jiffies_to_msecs(jiffies - READ_ONCE(q->lv_progress_jiffies)) > dead_ms)
+	    mx_liveness_stalled_ms(q) > dead_ms)
 		atomic_set(&q->lv_health, MX_LIVENESS_DEAD);
 
 	/* Probe: stalled past threshold, queue has room, no probe in flight. */
@@ -409,12 +443,6 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 		q->ops->build_ping_command(q->lv_ping_cmd);
 		q->ops->push_command(q, q->lv_ping_cmd);
 	}
-
-	/* Probe outstanding with no pong past the dead budget: dead. cmpxchg from
-	 * SUSPECT so a pong that just resolved the window (ALIVE) is not clobbered. */
-	if (atomic_read(&q->lv_inflight) &&
-	    ktime_get_ns() - READ_ONCE(q->lv_sent_ns) > (u64)dead_ms * NSEC_PER_MSEC)
-		atomic_cmpxchg(&q->lv_health, MX_LIVENESS_SUSPECT, MX_LIVENESS_DEAD);
 }
 
 int mx_submit_handler(void *arg)
@@ -438,7 +466,7 @@ int mx_submit_handler(void *arg)
 		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		spin_lock_irqsave(&q->sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
-			/* Ping outstanding: hold submits until the pong resolves — the liveness probe has priority. */
+			/* Ping outstanding: hold submits until a pong or completion — the probe has priority. */
 			if (lv_on && atomic_read(&q->lv_inflight))
 				break;
 			if (!ops->is_pushable(q))
@@ -451,7 +479,11 @@ int mx_submit_handler(void *arg)
 			command = transfer->command;
 			list_del_init(&transfer->entry);
 			trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
-			if (!no_completion && atomic_inc_return(&q->wait_count) == 1)
+			/* Zombies stay in wait_count until drained, so restart the stall
+			 * clock when no live command was outstanding before this one. */
+			if (!no_completion &&
+			    atomic_inc_return(&q->wait_count) -
+			    atomic_read(&q->zombie_wait_count) <= 1)
 				WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 			/*
 			 * Once the command is visible to the device its completion can

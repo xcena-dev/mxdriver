@@ -371,10 +371,10 @@ struct mx_queue {
 
 	/* Transport liveness watchdog (io_queue only) */
 	atomic_t lv_health;		/* enum mx_liveness_health */
-	atomic_t lv_inflight;		/* 0/1: a watchdog ping is outstanding */
+	atomic_t lv_inflight;		/* 0/1: submits held until a pong or completion */
 	u64 lv_sent_ns;			/* when the current ping was pushed (dead-budget + RTT) */
 	unsigned long lv_progress_jiffies; /* last completion, or batch start */
-	u64 lv_rtt_ns;
+	u64 lv_rtt_ns;			/* pong RTT; under-reads after a re-probe (same ping id) */
 	uint8_t lv_ping_cmd[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 

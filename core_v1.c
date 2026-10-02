@@ -77,7 +77,10 @@ static bool is_popable(struct mx_queue_v1 *queue)
 	struct mx_mbox *mbox = &queue->cq_mbox;
 	uint32_t pending_count;
 
-	if (atomic_read(&queue->common.wait_count) <= 0)
+	/* A pong does not count in wait_count; keep polling while a probe is
+	 * in flight, or a pong landing after the last completion is never popped. */
+	if (atomic_read(&queue->common.wait_count) <= 0 &&
+	    !atomic_read(&queue->common.lv_inflight))
 		return false;
 
 	mbox->ctx.u64 = readq((void *)mbox->r_ctx_addr);

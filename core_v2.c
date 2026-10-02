@@ -96,7 +96,10 @@ static bool is_popable(struct mx_queue_v2 *queue)
 	struct mx_completion *cqe;
 	uint16_t status, phase;
 
-	if (atomic_read(&queue->common.wait_count) <= 0)
+	/* A pong does not count in wait_count; keep polling while a probe is
+	 * in flight, or a pong landing after the last completion is never popped. */
+	if (atomic_read(&queue->common.wait_count) <= 0 &&
+	    !atomic_read(&queue->common.lv_inflight))
 		return false;
 
 	cqe = &queue->cqes[queue->cq_head];
