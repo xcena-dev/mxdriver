@@ -177,6 +177,11 @@ if ! grep -q 'admin_desynced' <<<"$completion_timeout_block" ||
     echo "a doorbelled admin command without completion must fail closed" >&2
     exit 1
 fi
+# v2 FW fills the NVMe status word with the phase and the echoed opcode.
+if search_re 'cmpl(\.|->)status' core_v2.c; then
+    echo "a v2 completion carries no status; its opcode echo is not a failure" >&2
+    exit 1
+fi
 publisher_check=$(search_context \
     'mx_lease_profile_is_publisher\(req\.profile\) &&' lease.c | \
     count_re '!capable\(CAP_SYS_RAWIO\)')

@@ -444,13 +444,16 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
+/* A matching completion is always a success:
+ * v2 FW asserts on a bad admin command,
+ * and the word NVMe uses for status holds the phase and the echoed opcode. */
 static void record_admin_terminal(struct mx_queue_v2 *admin_queue,
-				  u8 opcode, u16 status, u64 result)
+				  u8 opcode, u64 result)
 {
 	struct mx_queue_v2 *io_queue =
 		(struct mx_queue_v2 *)admin_queue->common.mx_pdev->io_queue;
 
-	if (status || !io_queue)
+	if (!io_queue)
 		return;
 	switch (opcode) {
 	case ADMIN_OPCODE_CREATE_IO_CQ:
@@ -477,7 +480,6 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	struct mx_completion cmpl;
 	struct mx_pci_dev *mx_pdev = queue->common.mx_pdev;
 	u16 cid;
-	u16 status;
 	int timeout = 500;
 	int count = 0;
 
@@ -530,13 +532,7 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 terminal:
 	atomic_dec(&queue->common.wait_count);
 	queue->admin_pending = false;
-	status = le16_to_cpu(cmpl.status) >> 1;
-	record_admin_terminal(queue, c->opcode, status,
-			      le64_to_cpu(cmpl.result));
-	if (status) {
-		pr_err("Admin command cid=%u failed with status=%#x\n", cid, status);
-		return false;
-	}
+	record_admin_terminal(queue, c->opcode, le64_to_cpu(cmpl.result));
 
 	if (result)
 		*result = le64_to_cpu(cmpl.result);
@@ -566,7 +562,6 @@ static int drain_pending_admin(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_completion cmpl;
-	u16 status;
 
 	if (!queue)
 		return 0;
@@ -590,12 +585,8 @@ static int drain_pending_admin(struct mx_pci_dev *mx_pdev)
 		}
 		atomic_dec(&queue->common.wait_count);
 		queue->admin_pending = false;
-		status = le16_to_cpu(cmpl.status) >> 1;
-		record_admin_terminal(queue, queue->admin_pending_opcode, status,
+		record_admin_terminal(queue, queue->admin_pending_opcode,
 				      le64_to_cpu(cmpl.result));
-		if (status)
-			pr_err("Late admin command cid=%u terminated with status=%#x\n",
-			       queue->admin_pending_cid, status);
 	}
 	queue->admin_desynced = false;
 	return 0;
@@ -691,9 +682,9 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.io_queue_info.cq_id = cq_id;
 	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
-		/* A timeout/CID mismatch desynchronizes the admin queue, so no further
-		 * command is safe. A matching error completion is terminal; delete the
-		 * already-created CQ below. */
+		/* A timeout desynchronizes the admin queue, and then no command is safe.
+		 * A command that never reached the SQ leaves the queue usable,
+		 * so delete the already-created CQ below. */
 		if (READ_ONCE(admin_queue->admin_desynced))
 			return -EIO;
 		ret = -EIO;
