@@ -103,6 +103,8 @@ struct im_ctx {
 	u64 tag;
 	u8 generation;
 	bool enabled;
+	/* Set under lock before kthread_stop(), whose wakeup would interrupt an HIO wait. */
+	bool stopping;
 	struct dentry *dir;
 	/* The firmware applies a verdict asynchronously, so an answered intent can be listed again. */
 	u32 replied_seq[IM_MAX_RELOCATORS][IM_MAX_SLOTS];
@@ -290,7 +292,7 @@ static int im_poll_thread(void *arg)
 		int handled;
 
 		mutex_lock(&im.lock);
-		handled = im_poll_once();
+		handled = im.stopping ? 0 : im_poll_once();
 		mutex_unlock(&im.lock);
 		if (handled <= 0)
 			msleep_interruptible(READ_ONCE(im_poll_ms));
@@ -354,6 +356,7 @@ static int im_enable(void)
 	if (dmi_match(DMI_SYS_VENDOR, "QEMU"))
 		im.cache_backdoor = ioremap(IM_QEMU_CACHE_BACKDOOR, PAGE_SIZE);
 
+	im.stopping = false;
 	im.generation = im.generation == U8_MAX ? 1 : im.generation + 1;
 	memset(im.replied_seq, 0, sizeof(im.replied_seq));
 	ret = im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY,
@@ -397,6 +400,7 @@ static void im_disable(void)
 	}
 	poller = im.poller;
 	im.poller = NULL;
+	im.stopping = true;
 	mutex_unlock(&im.lock);
 
 	/* The poller takes im.lock per pass, so it must be stopped without holding it. */
