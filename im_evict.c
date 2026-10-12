@@ -21,6 +21,7 @@
 
 #define IM_HIO_CMD_PAGE		4096
 #define IM_HIO_PAYLOAD		(16 * 1024)
+#define IM_HIO_BUF_SIZE		(IM_HIO_CMD_PAGE + IM_HIO_PAYLOAD)
 #define IM_HIO_GAIA_COMMAND	2
 #define IM_GAIA_MAGIC		0x494D
 #define IM_GAIA_VERSION		2
@@ -130,6 +131,20 @@ static int im_hio_status_to_errno(u32 status)
 	}
 }
 
+/* A transfer that timed out or was interrupted may still be written by the device: leak it. */
+static void im_hio_abandon_buf(void)
+{
+	pr_warn("im_evict: HIO transfer did not complete, abandoning its buffer\n");
+	im.buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
+}
+
+static void im_hio_free_buf(void)
+{
+	if (im.buf)
+		free_pages_exact(im.buf, IM_HIO_BUF_SIZE);
+	im.buf = NULL;
+}
+
 /* Caller holds im.lock. Returns the payload size the firmware wrote, or -errno. */
 static int im_hio(int opcode, u32 sub_opcode, u64 value, u32 payload_size)
 {
@@ -137,6 +152,8 @@ static int im_hio(int opcode, u32 sub_opcode, u64 value, u32 payload_size)
 	struct im_gaia_payload *payload = im.buf + sizeof(*hdr);
 	ssize_t ret;
 
+	if (!im.buf)
+		return -ENOMEM;
 	memset(im.buf, 0, IM_HIO_CMD_PAGE);
 	hdr->protocol_opcode = IM_HIO_GAIA_COMMAND;
 	hdr->data_size = payload_size;
@@ -149,6 +166,8 @@ static int im_hio(int opcode, u32 sub_opcode, u64 value, u32 payload_size)
 
 	ret = submit_protocol_transfer_kernel(im.mx_pdev, im.buf, IM_HIO_CMD_PAGE + payload_size,
 					      opcode);
+	if (ret == -ETIMEDOUT || ret == -EINTR || ret == -EIO)
+		im_hio_abandon_buf();
 	if (ret < 0)
 		return ret;
 	if (hdr->tag != im.tag)
@@ -314,7 +333,7 @@ static int im_enable(void)
 		goto unlock;
 
 	ret = -ENOMEM;
-	im.buf = alloc_pages_exact(IM_HIO_CMD_PAGE + IM_HIO_PAYLOAD, GFP_KERNEL | __GFP_ZERO);
+	im.buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
 	if (!im.buf)
 		goto unlock;
 	if (dmi_match(DMI_SYS_VENDOR, "QEMU"))
@@ -349,8 +368,7 @@ free:
 	if (im.cache_backdoor)
 		iounmap(im.cache_backdoor);
 	im.cache_backdoor = NULL;
-	free_pages_exact(im.buf, IM_HIO_CMD_PAGE + IM_HIO_PAYLOAD);
-	im.buf = NULL;
+	im_hio_free_buf();
 unlock:
 	mutex_unlock(&im.lock);
 	return ret;
@@ -379,8 +397,7 @@ static void im_disable(void)
 	if (im.cache_backdoor)
 		iounmap(im.cache_backdoor);
 	im.cache_backdoor = NULL;
-	free_pages_exact(im.buf, IM_HIO_CMD_PAGE + IM_HIO_PAYLOAD);
-	im.buf = NULL;
+	im_hio_free_buf();
 	im.enabled = false;
 	mutex_unlock(&im.lock);
 	pr_info("im_evict: disabled\n");
