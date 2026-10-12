@@ -543,6 +543,24 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 				    uint8_t *out_status, uint64_t *out_host_addr);
 
 ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf, size_t size, int opcode);
+long submit_passthru_command_kernel(struct mx_pci_dev *mx_pdev, int subopcode,
+				    uint64_t device_addr, uint64_t size, bool no_completion,
+				    uint8_t *out_status, uint64_t *out_host_addr);
+ssize_t submit_protocol_transfer_kernel(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode);
+struct mx_pci_dev *mx_pdev_find(int dev_id);
+
+#if IS_ENABLED(CONFIG_IM_SOFT_FAULT)
+void mx_im_init(void);
+void mx_im_exit(void);
+#else
+static inline void mx_im_init(void)
+{
+}
+
+static inline void mx_im_exit(void)
+{
+}
+#endif
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);

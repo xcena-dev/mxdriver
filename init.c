@@ -976,6 +976,23 @@ static struct mx_pci_dev *mxdma_find_device_locked(struct pci_dev *pdev)
 	return NULL;
 }
 
+/* No reference is taken: callers must stop using the device before module exit tears it down. */
+struct mx_pci_dev *mx_pdev_find(int dev_id)
+{
+	struct mx_pci_dev *mx_pdev, *found = NULL;
+
+	mutex_lock(&mx_device_list_lock);
+	list_for_each_entry(mx_pdev, &mx_device_list_head, registry_entry) {
+		if (mx_pdev->dev_id == dev_id) {
+			found = mx_pdev;
+			break;
+		}
+	}
+	mutex_unlock(&mx_device_list_lock);
+
+	return found;
+}
+
 static void mxdma_drop_attachment(struct mx_pci_dev *mx_pdev,
 				  struct pci_dev *pdev)
 {
@@ -1224,6 +1241,7 @@ static int mxdma_init(void)
 	}
 
 	pr_info("MXDMA driver is loaded\n");
+	mx_im_init();
 	mutex_lock(&mx_device_list_lock);
 	mxdma_accepting_devices = true;
 #ifndef CONFIG_WO_CXL
@@ -1273,6 +1291,8 @@ static int mxdma_init(void)
 
 static void mxdma_exit(void)
 {
+	mx_im_exit();
+
 	mutex_lock(&mx_device_list_lock);
 	mxdma_accepting_devices = false;
 #ifndef CONFIG_WO_CXL
