@@ -31,6 +31,8 @@
 #define IM_SUB_EVICT_REPLY	14
 #define IM_PREFETCH_SYNC	8
 #define IM_SPN_SHIFT		16
+#define IM_SPNS_PER_GROUP	8
+#define IM_GROUP_BYTES		((u64)IM_SPNS_PER_GROUP << IM_SPN_SHIFT)
 #define IM_EVENTS_VERSION	1
 #define IM_DEV_ID		0
 #define IM_MAX_RELOCATORS	64
@@ -84,6 +86,10 @@ static unsigned int im_poll_ms = 5;
 module_param(im_poll_ms, uint, 0644);
 MODULE_PARM_DESC(im_poll_ms, "Idle interval between eviction-intent polls (ms)");
 
+static unsigned int im_ack_timeout_ms = 5000;
+module_param(im_ack_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(im_ack_timeout_ms, "Firmware evicts an intent left unanswered this long (ms)");
+
 struct im_ctx {
 	/* Serializes enable/disable and every use of the shared HIO buffer. */
 	struct mutex lock;
@@ -91,7 +97,9 @@ struct im_ctx {
 	struct task_struct *poller;
 	void *buf;
 	void __iomem *cache_backdoor;
-	u64 hpa_base;
+	/* Debugfs inputs; copied into hpa_base/hpa_size at enable and fixed until disable. */
+	u64 hpa_base_param, hpa_size_param;
+	u64 hpa_base, hpa_size;
 	u64 tag;
 	u8 generation;
 	bool enabled;
@@ -194,13 +202,16 @@ static void im_writeback(u64 hpa, u64 len)
 
 static void im_handle_event(const struct im_event *ev)
 {
-	u64 hpa = im.hpa_base + ((u64)ev->start_spn << IM_SPN_SHIFT);
+	u64 offset = (u64)ev->start_spn << IM_SPN_SHIFT;
+	u64 hpa = im.hpa_base + offset;
 	enum im_evict_verdict verdict;
 	bool ack;
 	u64 value;
 
+	/* Unanswered, a malformed intent expires in the firmware like any other. */
 	if (ev->generation != im.generation || ev->relocator_id >= IM_MAX_RELOCATORS ||
-	    ev->slot_idx >= IM_MAX_SLOTS) {
+	    ev->slot_idx >= IM_MAX_SLOTS || ev->start_spn % IM_SPNS_PER_GROUP ||
+	    offset > im.hpa_size - IM_GROUP_BYTES) {
 		atomic64_inc(&im.stale);
 		return;
 	}
@@ -290,18 +301,19 @@ static int im_poll_thread(void *arg)
 static int im_fetch(void *priv, unsigned long pfn, unsigned long nr_pages)
 {
 	u64 hpa = PFN_PHYS(pfn);
+	u64 offset = hpa - im.hpa_base;
+	u64 len = (u64)nr_pages << PAGE_SHIFT;
 	u64 host_addr = 0;
 	u8 status = 0;
 	long ret;
 	u64 t0;
 
-	if (hpa < im.hpa_base)
+	if (hpa < im.hpa_base || offset >= im.hpa_size || len > im.hpa_size - offset)
 		return -EINVAL;
 
 	t0 = ktime_get_ns();
-	ret = submit_passthru_command_kernel(im.mx_pdev, IM_PREFETCH_SYNC, hpa - im.hpa_base,
-					     (u64)nr_pages << PAGE_SHIFT, false, &status,
-					     &host_addr);
+	ret = submit_passthru_command_kernel(im.mx_pdev, IM_PREFETCH_SYNC, offset, len, false,
+					     &status, &host_addr);
 	im_stat_time(&im.fetch_ns_max, &im.fetch_ns_total, ktime_get_ns() - t0);
 	atomic64_inc(&im.fetches);
 	if (!ret && status)
@@ -328,47 +340,47 @@ static int im_enable(void)
 	im.mx_pdev = mx_pdev_find(IM_DEV_ID);
 	if (!im.mx_pdev)
 		goto unlock;
-	ret = -EINVAL;
-	if (!im.hpa_base)
+	/* The kernel checks that the range is online memory of one node. */
+	im.hpa_base = im.hpa_base_param;
+	im.hpa_size = im.hpa_size_param;
+	ret = im_soft_fault_register(&im_ops, NULL, PHYS_PFN(im.hpa_base), PHYS_PFN(im.hpa_size));
+	if (ret)
 		goto unlock;
 
 	ret = -ENOMEM;
 	im.buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
 	if (!im.buf)
-		goto unlock;
+		goto unregister;
 	if (dmi_match(DMI_SYS_VENDOR, "QEMU"))
 		im.cache_backdoor = ioremap(IM_QEMU_CACHE_BACKDOOR, PAGE_SIZE);
 
 	im.generation = im.generation == U8_MAX ? 1 : im.generation + 1;
 	memset(im.replied_seq, 0, sizeof(im.replied_seq));
-	ret = im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY, 1 | ((u64)im.generation << 8), 0);
+	ret = im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY,
+		     1 | ((u64)im.generation << 8) | ((u64)READ_ONCE(im_ack_timeout_ms) << 16), 0);
 	if (ret < 0)
 		goto free;
-
-	ret = im_soft_fault_register(&im_ops, NULL);
-	if (ret)
-		goto notify_off;
 
 	im.poller = kthread_run(im_poll_thread, NULL, "mx_im_poll");
 	if (IS_ERR(im.poller)) {
 		ret = PTR_ERR(im.poller);
 		im.poller = NULL;
-		im_soft_fault_unregister();
-		goto notify_off;
+		im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY, (u64)im.generation << 8, 0);
+		goto free;
 	}
 	im.enabled = true;
 	mutex_unlock(&im.lock);
-	pr_info("im_evict: enabled (generation %u, hpa_base %#llx, cache backdoor %s)\n",
-		im.generation, im.hpa_base, im.cache_backdoor ? "on" : "off");
+	pr_info("im_evict: enabled (generation %u, hpa %#llx+%#llx, cache backdoor %s)\n",
+		im.generation, im.hpa_base, im.hpa_size, im.cache_backdoor ? "on" : "off");
 	return 0;
 
-notify_off:
-	im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY, (u64)im.generation << 8, 0);
 free:
 	if (im.cache_backdoor)
 		iounmap(im.cache_backdoor);
 	im.cache_backdoor = NULL;
 	im_hio_free_buf();
+unregister:
+	im_soft_fault_unregister();
 unlock:
 	mutex_unlock(&im.lock);
 	return ret;
@@ -389,11 +401,16 @@ static void im_disable(void)
 
 	/* The poller takes im.lock per pass, so it must be stopped without holding it. */
 	kthread_stop(poller);
-	im_soft_fault_unregister();
 
 	mutex_lock(&im.lock);
 	if (im_hio(IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY, (u64)im.generation << 8, 0) < 0)
 		pr_warn("im_evict: SetEvictNotify(disable) failed\n");
+	mutex_unlock(&im.lock);
+
+	/* Pages every folio still parked back in through im_fetch() before it returns. */
+	im_soft_fault_unregister();
+
+	mutex_lock(&im.lock);
 	if (im.cache_backdoor)
 		iounmap(im.cache_backdoor);
 	im.cache_backdoor = NULL;
@@ -431,8 +448,10 @@ static int im_stats_show(struct seq_file *m, void *v)
 {
 	u64 polls = atomic64_read(&im.polls), fetches = atomic64_read(&im.fetches);
 
-	seq_printf(m, "enabled=%d generation=%u hpa_base=%#llx poll_ms=%u\n", im.enabled,
-		   im.generation, im.hpa_base, READ_ONCE(im_poll_ms));
+	seq_printf(m, "enabled=%d generation=%u hpa_base=%#llx hpa_size=%#llx", im.enabled,
+		   im.generation, im.hpa_base, im.hpa_size);
+	seq_printf(m, " poll_ms=%u ack_timeout_ms=%u\n", READ_ONCE(im_poll_ms),
+		   READ_ONCE(im_ack_timeout_ms));
 	seq_printf(m, "polls=%lld poll_err=%lld events=%lld stale=%lld dup=%lld\n", polls,
 		   atomic64_read(&im.poll_err), atomic64_read(&im.events), atomic64_read(&im.stale),
 		   atomic64_read(&im.dup));
@@ -454,7 +473,8 @@ DEFINE_SHOW_ATTRIBUTE(im_stats);
 void mx_im_init(void)
 {
 	im.dir = debugfs_create_dir("mx_dma_im", NULL);
-	debugfs_create_x64("hpa_base", 0600, im.dir, &im.hpa_base);
+	debugfs_create_x64("hpa_base", 0600, im.dir, &im.hpa_base_param);
+	debugfs_create_x64("hpa_size", 0600, im.dir, &im.hpa_size_param);
 	debugfs_create_file("enable", 0200, im.dir, NULL, &im_enable_fops);
 	debugfs_create_file("stats", 0400, im.dir, NULL, &im_stats_fops);
 }
