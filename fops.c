@@ -96,128 +96,6 @@ static void mxdma_device_finish(struct mx_pci_dev *mx_pdev)
 	percpu_ref_put(&mx_pdev->io_ref);
 }
 
-static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_file_ctx *ctx;
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	ssize_t ret;
-
-	if (!count) {
-		pr_warn("size of data to read is zero\n");
-		return -EINVAL;
-	}
-
-	if (pos == NULL || *pos == 0) {
-		pr_warn("Invalid position to read\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &ctx, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-	ret = mx_lease_direct_begin(ctx);
-	if (ret) {
-		mxdma_device_finish(mx_pdev);
-		return ret;
-	}
-
-	mx_prewake_handlers(mx_pdev);
-	ret = read_data_from_device_parallel(ctx, buf, count, pos, IO_OPCODE_DATA_READ);
-	mx_lease_direct_end(ctx);
-	mxdma_device_finish(mx_pdev);
-	return ret;
-}
-
-static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_file_ctx *ctx;
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	ssize_t ret;
-
-	if (!count) {
-		pr_warn("size of data to read is zero\n");
-		return -EINVAL;
-	}
-
-	if (pos == NULL || *pos == 0) {
-		pr_warn("Invalid position to read\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &ctx, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-	ret = mx_lease_direct_begin(ctx);
-	if (ret) {
-		mxdma_device_finish(mx_pdev);
-		return ret;
-	}
-
-	mx_prewake_handlers(mx_pdev);
-	ret = read_data_from_device(ctx, buf, count, pos, IO_OPCODE_CONTEXT_READ);
-	mx_lease_direct_end(ctx);
-	mxdma_device_finish(mx_pdev);
-	return ret;
-}
-
-static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_file_ctx *ctx;
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	ssize_t ret;
-
-	if (!count) {
-		pr_warn("size of data to write is zero\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &ctx, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-	ret = mx_lease_direct_begin(ctx);
-	if (ret) {
-		mxdma_device_finish(mx_pdev);
-		return ret;
-	}
-
-	mx_prewake_handlers(mx_pdev);
-	ret = write_data_to_device_parallel(ctx, buf, count, pos, IO_OPCODE_DATA_WRITE, false);
-	mx_lease_direct_end(ctx);
-	mxdma_device_finish(mx_pdev);
-	return ret;
-}
-
-static ssize_t mxdma_device_write_context(struct file *file, const char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_file_ctx *ctx;
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	ssize_t ret;
-
-	if (!count) {
-		pr_warn("size of data to write is zero\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &ctx, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-	ret = mx_lease_direct_begin(ctx);
-	if (ret) {
-		mxdma_device_finish(mx_pdev);
-		return ret;
-	}
-
-	mx_prewake_handlers(mx_pdev);
-	ret = write_data_to_device(ctx, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, false);
-	mx_lease_direct_end(ctx);
-	mxdma_device_finish(mx_pdev);
-	return ret;
-}
-
 static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct mx_file_ctx *ctx;
@@ -245,22 +123,6 @@ static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	return ret;
 }
 
-static long mxdma_lease_only_ioctl(struct file *file, unsigned int cmd,
-				   unsigned long arg)
-{
-	struct mx_file_ctx *ctx;
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	long ret;
-
-	ret = mxdma_device_prepare(file, &ctx, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-	ret = mx_lease_ioctl_cmd(cmd) ? mx_lease_ioctl(ctx, cmd, arg) : -ENOTTY;
-	mxdma_device_finish(mx_pdev);
-	return ret;
-}
-
 #ifdef CONFIG_COMPAT
 static long mxdma_device_compat_ioctl(struct file *file, unsigned int cmd,
 				      unsigned long arg)
@@ -268,15 +130,6 @@ static long mxdma_device_compat_ioctl(struct file *file, unsigned int cmd,
 	if (!mx_lease_ioctl_cmd(cmd))
 		return -ENOIOCTLCMD;
 	return mxdma_device_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
-}
-
-static long mxdma_lease_only_compat_ioctl(struct file *file, unsigned int cmd,
-					 unsigned long arg)
-{
-	if (!mx_lease_ioctl_cmd(cmd))
-		return -ENOIOCTLCMD;
-	return mxdma_lease_only_ioctl(file, cmd,
-				       (unsigned long)compat_ptr(arg));
 }
 #endif
 
@@ -348,30 +201,6 @@ static ssize_t mxdma_bdf_read(struct file *file, char __user *buf, size_t count,
 	return ret;
 }
 
-static const struct file_operations mxdma_fops_data = {
-	.owner = THIS_MODULE,
-	.open = mxdma_device_open,
-	.release = mxdma_device_release,
-	.read = mxdma_device_read_data,
-	.write = mxdma_device_write_data,
-	.unlocked_ioctl = mxdma_lease_only_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = mxdma_lease_only_compat_ioctl,
-#endif
-};
-
-static const struct file_operations mxdma_fops_context = {
-	.owner = THIS_MODULE,
-	.open = mxdma_device_open,
-	.release = mxdma_device_release,
-	.read = mxdma_device_read_context,
-	.write = mxdma_device_write_context,
-	.unlocked_ioctl = mxdma_lease_only_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = mxdma_lease_only_compat_ioctl,
-#endif
-};
-
 static const struct file_operations mxdma_fops_ioctl = {
 	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
@@ -398,8 +227,6 @@ static const struct file_operations mxdma_fops_bdf = {
 };
 
 const struct file_operations *mxdma_fops_array[] = {
-	[MX_CDEV_DATA] = &mxdma_fops_data,
-	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
 	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,
 	[MX_CDEV_EVENT] = &mxdma_fops_event,
 	[MX_CDEV_BDF] = &mxdma_fops_bdf,

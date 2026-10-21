@@ -97,17 +97,13 @@
 #define MX_CPU_LATENCY_QOS_US	8
 
 enum {
-	MX_CDEV_DATA = 0,
-	MX_CDEV_CONTEXT,
-	MX_CDEV_IOCTL,
+	MX_CDEV_IOCTL = 0,
 	MX_CDEV_EVENT,
 	MX_CDEV_BDF,
 	NUM_OF_MX_CDEV,
 };
 
 static const char * const node_name[] __maybe_unused = {
-	MXDMA_NODE_NAME "%d_data",
-	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",
 	MXDMA_NODE_NAME "%d_bdf",

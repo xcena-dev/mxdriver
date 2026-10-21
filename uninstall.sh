@@ -35,6 +35,13 @@ if [[ -f /etc/initramfs-tools/modules ]]; then
     sed -i '/^mx_dma$/d' /etc/initramfs-tools/modules
 fi
 
+# Remove the device-access group rule. The group itself is left in place.
+if [[ -f /etc/udev/rules.d/60-xcena-mx_dma.rules ]]; then
+    rm -f /etc/udev/rules.d/60-xcena-mx_dma.rules
+    udevadm control --reload-rules \
+        || echo "[INFO] udevadm reload failed as above; applies at boot."
+fi
+
 # Remove CXL udev helpers
 if [[ -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     echo "[INFO] Removing xcena_set_devdax_perm..."

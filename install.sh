@@ -180,6 +180,18 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
+# The driver ships the nodes root-only (mxdma_devnode); this rule grants the
+# device group. Any process doing device I/O must belong to it.
+getent group xcena >/dev/null 2>&1 || groupadd --system xcena
+cat > /etc/udev/rules.d/60-xcena-mx_dma.rules <<'EOF'
+SUBSYSTEM=="mx_dma", KERNEL=="mx_dma*", GROUP="xcena", MODE="0660"
+EOF
+udevadm control --reload-rules \
+    && udevadm trigger --subsystem-match=mx_dma --action=change \
+    || echo "[INFO] udevadm reload/trigger failed as above; rule applies at boot."
+echo "[INFO] Device nodes are now restricted to the 'xcena' group."
+echo "[INFO] Add each user that performs device I/O: sudo usermod -aG xcena <user> (re-login to apply)."
+
 # CXL-only setup. WO_CXL=1 builds use pci_register_driver and do not depend on
 # the PCI bus_notifier ordering, so none of the softdep / initramfs bits
 # below apply there.
