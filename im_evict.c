@@ -98,7 +98,9 @@ MODULE_PARM_DESC(im_cache_backdoor, "Write back CPU caches through the QEMU host
 
 struct mx_im {
 	struct mx_pci_dev *mx_pdev;
-	/* Serializes enable/disable and every use of the shared HIO buffer. */
+	/* Held across a whole enable, disable or detach; none returns while another is midway. */
+	struct mutex ctl_lock;
+	/* Serializes the poller with control steps and every use of the shared HIO buffer. */
 	struct mutex lock;
 	struct im_soft_fault_provider *prov;
 	struct task_struct *poller;
@@ -599,15 +601,14 @@ static int im_enable(struct mx_im *im)
 {
 	int ret;
 
+	mutex_lock(&im->ctl_lock);
 	mutex_lock(&im->lock);
 	ret = -ENODEV;
 	if (im->dead)
 		goto unlock;
-	if (im->enabled) {
-		/* A disable in progress still holds the provider and the HIO buffer. */
-		ret = im->stopping ? -EBUSY : 0;
+	ret = 0;
+	if (im->enabled)
 		goto unlock;
-	}
 	ret = im_find_range(im);
 	if (ret) {
 		pr_warn("im_evict: mx_dma%d has no usable IM range (%d)\n", im->mx_pdev->dev_id,
@@ -653,6 +654,7 @@ static int im_enable(struct mx_im *im)
 	pr_info("im_evict: mx_dma%d enabled (generation %u, ram %#llx+%#llx, cache backdoor %s)\n",
 		im->mx_pdev->dev_id, im->generation, im->ram_base, im->ram_size,
 		im->cache_backdoor ? "on" : "off");
+	mutex_unlock(&im->ctl_lock);
 	return 0;
 
 free:
@@ -665,16 +667,17 @@ unregister:
 	im->prov = NULL;
 unlock:
 	mutex_unlock(&im->lock);
+	mutex_unlock(&im->ctl_lock);
 	return ret;
 }
 
-static void im_disable(struct mx_im *im)
+static void im_disable_locked(struct mx_im *im)
 {
 	struct task_struct *poller;
 
+	lockdep_assert_held(&im->ctl_lock);
 	mutex_lock(&im->lock);
-	/* One disable tears down; a second would stop a NULL poller and free the provider twice. */
-	if (!im->enabled || im->stopping) {
+	if (!im->enabled) {
 		mutex_unlock(&im->lock);
 		return;
 	}
@@ -703,6 +706,13 @@ static void im_disable(struct mx_im *im)
 	im->enabled = false;
 	mutex_unlock(&im->lock);
 	pr_info("im_evict: mx_dma%d disabled\n", im->mx_pdev->dev_id);
+}
+
+static void im_disable(struct mx_im *im)
+{
+	mutex_lock(&im->ctl_lock);
+	im_disable_locked(im);
+	mutex_unlock(&im->ctl_lock);
 }
 
 static struct mx_im *im_of(struct device *dev)
@@ -845,6 +855,7 @@ void mx_im_attach(struct mx_pci_dev *mx_pdev)
 	im = kzalloc(sizeof(*im), GFP_KERNEL);
 	if (!im)
 		return;
+	mutex_init(&im->ctl_lock);
 	mutex_init(&im->lock);
 	INIT_WORK(&im->reset_work, im_reset_work);
 	im->mx_pdev = mx_pdev;
@@ -863,11 +874,13 @@ void mx_im_detach(struct mx_pci_dev *mx_pdev)
 
 	if (!im)
 		return;
+	mutex_lock(&im->ctl_lock);
 	mutex_lock(&im->lock);
 	im->dead = true;
 	mutex_unlock(&im->lock);
 	cancel_work_sync(&im->reset_work);
-	im_disable(im);
+	im_disable_locked(im);
+	mutex_unlock(&im->ctl_lock);
 	debugfs_remove_recursive(im->dir);
 	im->dir = NULL;
 }
