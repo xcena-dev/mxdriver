@@ -94,6 +94,7 @@ struct im_ctx {
 	/* Serializes enable/disable and every use of the shared HIO buffer. */
 	struct mutex lock;
 	struct mx_pci_dev *mx_pdev;
+	struct im_soft_fault_provider *prov;
 	struct task_struct *poller;
 	void *buf;
 	void __iomem *cache_backdoor;
@@ -243,7 +244,7 @@ static void im_reply(const struct im_event *ev, bool ack, ktime_t polled_at)
 static enum im_evict_verdict im_decide(const struct im_event *ev)
 {
 	u64 hpa = im.hpa_base + ((u64)ev->start_spn << IM_SPN_SHIFT);
-	enum im_evict_verdict verdict = im_soft_fault_evict_intent(PHYS_PFN(hpa));
+	enum im_evict_verdict verdict = im_soft_fault_evict_intent(im.prov, PHYS_PFN(hpa));
 
 	switch (verdict) {
 	case IM_EVICT_PARKED:
@@ -397,9 +398,13 @@ static int im_enable(void)
 	/* The kernel checks that the range is online memory of one node. */
 	im.hpa_base = im.hpa_base_param;
 	im.hpa_size = im.hpa_size_param;
-	ret = im_soft_fault_register(&im_ops, NULL, PHYS_PFN(im.hpa_base), PHYS_PFN(im.hpa_size));
-	if (ret)
+	im.prov = im_soft_fault_register(&im_ops, NULL, PHYS_PFN(im.hpa_base),
+					 PHYS_PFN(im.hpa_size));
+	if (IS_ERR(im.prov)) {
+		ret = PTR_ERR(im.prov);
+		im.prov = NULL;
 		goto unlock;
+	}
 
 	ret = -ENOMEM;
 	im.buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
@@ -435,7 +440,8 @@ free:
 	im.cache_backdoor = NULL;
 	im_hio_free_buf();
 unregister:
-	im_soft_fault_unregister();
+	im_soft_fault_unregister(im.prov);
+	im.prov = NULL;
 unlock:
 	mutex_unlock(&im.lock);
 	return ret;
@@ -464,9 +470,10 @@ static void im_disable(void)
 	mutex_unlock(&im.lock);
 
 	/* Pages every folio still parked back in through im_fetch() before it returns. */
-	im_soft_fault_unregister();
+	im_soft_fault_unregister(im.prov);
 
 	mutex_lock(&im.lock);
+	im.prov = NULL;
 	if (im.cache_backdoor)
 		iounmap(im.cache_backdoor);
 	im.cache_backdoor = NULL;
