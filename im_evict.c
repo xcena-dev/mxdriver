@@ -116,6 +116,7 @@ struct mx_im {
 	bool stopping;
 	/* Set when the device is going away; no enable is accepted after it. */
 	bool dead;
+	struct work_struct reset_work;
 	struct dentry *dir;
 	/* The firmware applies a verdict asynchronously, so an answered intent can be listed again. */
 	u32 replied_seq[IM_MAX_RELOCATORS][IM_MAX_SLOTS];
@@ -815,6 +816,27 @@ static int im_stats_show(struct seq_file *m, void *v)
 }
 DEFINE_SHOW_ATTRIBUTE(im_stats);
 
+/*
+ * A driver that went away while enabled leaves the firmware posting intents nobody answers.
+ * Turning the notify off runs from a work item, so an attach never waits on firmware without IM.
+ */
+static void im_reset_work(struct work_struct *work)
+{
+	struct mx_im *im = container_of(work, struct mx_im, reset_work);
+	int ret;
+
+	mutex_lock(&im->lock);
+	if (im->enabled || im->dead)
+		goto unlock;
+	im->buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
+	ret = im_hio(im, IO_OPCODE_SEND, IM_SUB_SET_EVICT_NOTIFY, 0, 0);
+	im_hio_free_buf(im);
+	pr_info("im_evict: mx_dma%d firmware eviction notify reset (%d)\n", im->mx_pdev->dev_id,
+		ret < 0 ? ret : 0);
+unlock:
+	mutex_unlock(&im->lock);
+}
+
 void mx_im_attach(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_im *im;
@@ -824,12 +846,14 @@ void mx_im_attach(struct mx_pci_dev *mx_pdev)
 	if (!im)
 		return;
 	mutex_init(&im->lock);
+	INIT_WORK(&im->reset_work, im_reset_work);
 	im->mx_pdev = mx_pdev;
 	im->ack_timeout_ms = IM_ACK_TIMEOUT_DEFAULT_MS;
 	snprintf(name, sizeof(name), "mx_dma%d_im", mx_pdev->dev_id);
 	im->dir = debugfs_create_dir(name, NULL);
 	debugfs_create_file("stats", 0400, im->dir, im, &im_stats_fops);
 	WRITE_ONCE(mx_pdev->im, im);
+	schedule_work(&im->reset_work);
 }
 
 /* Stops IM while the device's transport still works; parked folios are paged back in. */
@@ -842,6 +866,7 @@ void mx_im_detach(struct mx_pci_dev *mx_pdev)
 	mutex_lock(&im->lock);
 	im->dead = true;
 	mutex_unlock(&im->lock);
+	cancel_work_sync(&im->reset_work);
 	im_disable(im);
 	debugfs_remove_recursive(im->dir);
 	im->dir = NULL;
