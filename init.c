@@ -450,6 +450,9 @@ static const struct attribute_group liveness_group = {
 
 static const struct attribute_group *mxdma_dev_groups[] = {
 	&liveness_group,
+#if IS_ENABLED(CONFIG_IM_SOFT_FAULT)
+	&mx_im_group,
+#endif
 	NULL,
 };
 
@@ -752,6 +755,8 @@ static bool destroy_mx_pdev(struct mx_pci_dev *mx_pdev, bool actual_pci_unbind)
 		mxdma_wait_io_quiesced(mx_pdev);
 		goto stop_protocol;
 	}
+	/* Before the device goes offline: IM pages parked folios back in through it. */
+	mx_im_detach(mx_pdev);
 	mx_pdev->teardown_started = true;
 	mx_lease_mark_removed(mx_pdev);
 	/* Refuse new entries first (removed + the io_ref kill are what
@@ -766,6 +771,7 @@ static bool destroy_mx_pdev(struct mx_pci_dev *mx_pdev, bool actual_pci_unbind)
 
 	for (type = 0; type < NUM_OF_MX_CDEV; type++)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
+	mx_im_free(mx_pdev);
 	mxdma_unmap_all_bar_vmas(mx_pdev);
 	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
 		cpu_latency_qos_remove_request(&mx_pdev->cpu_latency_req);
@@ -976,23 +982,6 @@ static struct mx_pci_dev *mxdma_find_device_locked(struct pci_dev *pdev)
 	return NULL;
 }
 
-/* No reference is taken: callers must stop using the device before module exit tears it down. */
-struct mx_pci_dev *mx_pdev_find(int dev_id)
-{
-	struct mx_pci_dev *mx_pdev, *found = NULL;
-
-	mutex_lock(&mx_device_list_lock);
-	list_for_each_entry(mx_pdev, &mx_device_list_head, registry_entry) {
-		if (mx_pdev->dev_id == dev_id) {
-			found = mx_pdev;
-			break;
-		}
-	}
-	mutex_unlock(&mx_device_list_lock);
-
-	return found;
-}
-
 static void mxdma_drop_attachment(struct mx_pci_dev *mx_pdev,
 				  struct pci_dev *pdev)
 {
@@ -1085,6 +1074,7 @@ static int mxdma_attach_device(struct pci_dev *pdev)
 	mutex_lock(&mx_device_list_lock);
 	list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
 	mutex_unlock(&mx_device_list_lock);
+	mx_im_attach(mx_pdev);
 	pr_info("pci device is attached (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
 		pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
 	return 0;
@@ -1241,7 +1231,6 @@ static int mxdma_init(void)
 	}
 
 	pr_info("MXDMA driver is loaded\n");
-	mx_im_init();
 	mutex_lock(&mx_device_list_lock);
 	mxdma_accepting_devices = true;
 #ifndef CONFIG_WO_CXL
@@ -1291,8 +1280,6 @@ static int mxdma_init(void)
 
 static void mxdma_exit(void)
 {
-	mx_im_exit();
-
 	mutex_lock(&mx_device_list_lock);
 	mxdma_accepting_devices = false;
 #ifndef CONFIG_WO_CXL

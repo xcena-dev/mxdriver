@@ -332,6 +332,7 @@ struct mx_bar_vma {
 };
 
 struct mx_queue;
+struct mx_im;
 
 struct mx_completion_info {
 	int id;
@@ -491,6 +492,9 @@ struct mx_pci_dev {
 	 * idle is still allowed so we don't force a polling-idle CPU.
 	 */
 	struct pm_qos_request cpu_latency_req;
+
+	/* Infinite Memory eviction notify; set from attach until the device's sysfs is gone. */
+	struct mx_im *im;
 };
 
 extern const struct file_operations *mxdma_fops_array[];
@@ -548,17 +552,22 @@ ssize_t mx_kxfer_protocol(struct mx_pci_dev *mx_pdev, void *buf, size_t size, in
 long mx_kxfer_passthru(struct mx_pci_dev *mx_pdev, int subopcode, uint64_t device_addr,
 		       uint64_t size, bool no_completion, uint8_t *out_status,
 		       uint64_t *out_host_addr);
-struct mx_pci_dev *mx_pdev_find(int dev_id);
 
 #if IS_ENABLED(CONFIG_IM_SOFT_FAULT)
-void mx_im_init(void);
-void mx_im_exit(void);
+extern const struct attribute_group mx_im_group;
+void mx_im_attach(struct mx_pci_dev *mx_pdev);
+void mx_im_detach(struct mx_pci_dev *mx_pdev);
+void mx_im_free(struct mx_pci_dev *mx_pdev);
 #else
-static inline void mx_im_init(void)
+static inline void mx_im_attach(struct mx_pci_dev *mx_pdev)
 {
 }
 
-static inline void mx_im_exit(void)
+static inline void mx_im_detach(struct mx_pci_dev *mx_pdev)
+{
+}
+
+static inline void mx_im_free(struct mx_pci_dev *mx_pdev)
 {
 }
 #endif
