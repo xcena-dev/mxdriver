@@ -388,7 +388,8 @@ static int im_enable(void)
 
 	mutex_lock(&im.lock);
 	if (im.enabled) {
-		ret = 0;
+		/* A disable in progress still holds the provider and the HIO buffer. */
+		ret = im.stopping ? -EBUSY : 0;
 		goto unlock;
 	}
 	ret = -ENODEV;
@@ -452,7 +453,8 @@ static void im_disable(void)
 	struct task_struct *poller;
 
 	mutex_lock(&im.lock);
-	if (!im.enabled) {
+	/* One disable tears down; a second would stop a NULL poller and free the provider twice. */
+	if (!im.enabled || im.stopping) {
 		mutex_unlock(&im.lock);
 		return;
 	}
