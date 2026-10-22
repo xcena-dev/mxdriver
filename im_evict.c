@@ -198,18 +198,22 @@ static int im_hio(struct mx_im *im, int opcode, u32 sub_opcode, u64 value, u32 p
 	return min_t(u32, hdr->data_size, payload_size);
 }
 
+/* Yields per page: without preemption a batch of 2 MiB writebacks would hold the CPU. */
 static void im_writeback(struct mx_im *im, u64 hpa, u64 len)
 {
-	u64 addr;
+	u64 page, addr;
 
-	if (im->cache_backdoor) {
-		for (addr = hpa; addr < hpa + len; addr += IM_CACHE_LINE)
-			writeq(addr, im->cache_backdoor);
-		return;
-	}
+	for (page = hpa; page < hpa + len; page += PAGE_SIZE) {
+		if (im->cache_backdoor) {
+			for (addr = page; addr < page + PAGE_SIZE; addr += IM_CACHE_LINE)
+				writeq(addr, im->cache_backdoor);
+		} else {
 #ifdef CONFIG_X86
-	clflush_cache_range(phys_to_virt(hpa), len);
+			clflush_cache_range(phys_to_virt(page), PAGE_SIZE);
 #endif
+		}
+		cond_resched();
+	}
 }
 
 /* Maps an intent to its HPA, or returns false when it lies outside the device's region. */
