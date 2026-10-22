@@ -10,7 +10,6 @@
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
-#include <linux/dmi.h>
 #include <linux/fs.h>
 #include <linux/im_soft_fault.h>
 #include <linux/io.h>
@@ -92,6 +91,10 @@ static_assert(sizeof(struct im_event) == 16);
 static unsigned int im_poll_ms = 5;
 module_param(im_poll_ms, uint, 0644);
 MODULE_PARM_DESC(im_poll_ms, "Idle interval between eviction-intent polls (ms)");
+
+static bool im_cache_backdoor;
+module_param(im_cache_backdoor, bool, 0644);
+MODULE_PARM_DESC(im_cache_backdoor, "Write back CPU caches through the QEMU host-cache model (emulator only)");
 
 struct mx_im {
 	struct mx_pci_dev *mx_pdev;
@@ -623,8 +626,11 @@ static int im_enable(struct mx_im *im)
 	im->buf = alloc_pages_exact(IM_HIO_BUF_SIZE, GFP_KERNEL | __GFP_ZERO);
 	if (!im->buf)
 		goto unregister;
-	if (dmi_match(DMI_SYS_VENDOR, "QEMU"))
+	if (READ_ONCE(im_cache_backdoor)) {
 		im->cache_backdoor = ioremap(IM_QEMU_CACHE_BACKDOOR, PAGE_SIZE);
+		if (!im->cache_backdoor)
+			goto free;
+	}
 
 	im->stopping = false;
 	im->generation = im->generation == U8_MAX ? 1 : im->generation + 1;
