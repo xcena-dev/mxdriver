@@ -543,10 +543,11 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 				    uint8_t *out_status, uint64_t *out_host_addr);
 
 ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf, size_t size, int opcode);
-long submit_passthru_command_kernel(struct mx_pci_dev *mx_pdev, int subopcode,
-				    uint64_t device_addr, uint64_t size, bool no_completion,
-				    uint8_t *out_status, uint64_t *out_host_addr);
-ssize_t submit_protocol_transfer_kernel(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode);
+/* Transfers the driver issues on its own behalf: there is no file context, so no lease applies. */
+ssize_t mx_kxfer_protocol(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode);
+long mx_kxfer_passthru(struct mx_pci_dev *mx_pdev, int subopcode, uint64_t device_addr,
+		       uint64_t size, bool no_completion, uint8_t *out_status,
+		       uint64_t *out_host_addr);
 struct mx_pci_dev *mx_pdev_find(int dev_id);
 
 #if IS_ENABLED(CONFIG_IM_SOFT_FAULT)

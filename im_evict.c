@@ -175,8 +175,7 @@ static int im_hio(int opcode, u32 sub_opcode, u64 value, u32 payload_size)
 	payload->arg1 = sub_opcode;
 	payload->arg2 = value;
 
-	ret = submit_protocol_transfer_kernel(im.mx_pdev, im.buf, IM_HIO_CMD_PAGE + payload_size,
-					      opcode);
+	ret = mx_kxfer_protocol(im.mx_pdev, im.buf, IM_HIO_CMD_PAGE + payload_size, opcode);
 	if (ret == -ETIMEDOUT || ret == -EINTR || ret == -EIO)
 		im_hio_abandon_buf();
 	if (ret < 0)
@@ -367,8 +366,8 @@ static int im_fetch(void *priv, unsigned long pfn, unsigned long nr_pages)
 		return -EINVAL;
 
 	t0 = ktime_get_ns();
-	ret = submit_passthru_command_kernel(im.mx_pdev, IM_PREFETCH_SYNC, offset, len, false,
-					     &status, &host_addr);
+	ret = mx_kxfer_passthru(im.mx_pdev, IM_PREFETCH_SYNC, offset, len, false, &status,
+				&host_addr);
 	im_stat_time(&im.fetch_ns_max, &im.fetch_ns_total, ktime_get_ns() - t0);
 	atomic64_inc(&im.fetches);
 	if (!ret && status)

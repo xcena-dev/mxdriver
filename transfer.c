@@ -963,8 +963,8 @@ ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf,
 			DMA_BIDIRECTIONAL, opcode, 1, false);
 }
 
-/* HIO Send/Recv on a physically contiguous kernel buffer, for in-kernel callers. */
-ssize_t submit_protocol_transfer_kernel(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode)
+/* HIO Send/Recv on a physically contiguous kernel buffer. */
+ssize_t mx_kxfer_protocol(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode)
 {
 	struct mx_sg_context *ctx;
 	struct mx_transfer *transfer;
@@ -1114,9 +1114,9 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 				 no_completion, out_status, out_host_addr);
 }
 
-long submit_passthru_command_kernel(struct mx_pci_dev *mx_pdev, int subopcode,
-				    uint64_t device_addr, uint64_t size, bool no_completion,
-				    uint8_t *out_status, uint64_t *out_host_addr)
+long mx_kxfer_passthru(struct mx_pci_dev *mx_pdev, int subopcode, uint64_t device_addr,
+		       uint64_t size, bool no_completion, uint8_t *out_status,
+		       uint64_t *out_host_addr)
 {
 	return __submit_passthru(mx_pdev, NULL, subopcode, device_addr, size,
 				 no_completion, out_status, out_host_addr);
