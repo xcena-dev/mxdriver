@@ -180,17 +180,24 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
-# The driver ships the nodes root-only (mxdma_devnode); this rule grants the
-# device group. Any process doing device I/O must belong to it.
+# Remove the device-group udev rule that earlier builds installed.
+# Nodes it restricted keep that group and mode until the module reloads,
+# so reopen the ones present now to the driver's default.
+if [[ -f /etc/udev/rules.d/60-xcena-mx_dma.rules ]]; then
+    rm -f /etc/udev/rules.d/60-xcena-mx_dma.rules
+    udevadm control --reload-rules \
+        || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
+    for node in /dev/mx_dma/mx_dma*; do
+        [[ -c "$node" ]] || continue
+        chown root:root "$node" && chmod 0666 "$node" \
+            || echo "[WARN] Could not reopen ${node}; it reopens when the module reloads."
+    done
+    echo "[INFO] Removed the device-group udev rule; device nodes are open to all users."
+fi
+
+# Earlier builds created this group, and users were told to join it or pass its GID to containers;
+# keep creating it so those setups still work on a new host.
 getent group xcena >/dev/null 2>&1 || groupadd --system xcena
-cat > /etc/udev/rules.d/60-xcena-mx_dma.rules <<'EOF'
-SUBSYSTEM=="mx_dma", KERNEL=="mx_dma*", GROUP="xcena", MODE="0660"
-EOF
-udevadm control --reload-rules \
-    && udevadm trigger --subsystem-match=mx_dma --action=change \
-    || echo "[INFO] udevadm reload/trigger failed as above; rule applies at boot."
-echo "[INFO] Device nodes are now restricted to the 'xcena' group."
-echo "[INFO] Add each user that performs device I/O: sudo usermod -aG xcena <user> (re-login to apply)."
 
 # CXL-only setup. WO_CXL=1 builds use pci_register_driver and do not depend on
 # the PCI bus_notifier ordering, so none of the softdep / initramfs bits

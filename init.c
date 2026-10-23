@@ -1125,10 +1125,8 @@ static char *mxdma_devnode(struct device *dev, umode_t *mode)
 static char *mxdma_devnode(const struct device *dev, umode_t *mode)
 #endif
 {
-	/* Ship root-only; the bundled udev rule grants the device group.
-	 * Without that rule the node stays root-only, which is fail-closed. */
 	if (mode)
-		*mode = 0600;
+		*mode = 0666;
 	return kasprintf(GFP_KERNEL, "%s/%s", MXDMA_NODE_NAME, dev_name(dev));
 }
 
