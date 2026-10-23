@@ -1,0 +1,4650 @@
+{
+  "versions": {
+    "1": {
+      "pool_reserve_bytes": 1024,
+      "ip_order": [
+        "relocator",
+        "storage",
+        "arbitrator",
+        "router",
+        "detector"
+      ],
+      "ips": {
+        "relocator": [
+          {
+            "name": "Hit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2048
+          },
+          {
+            "name": "Miss",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2052
+          },
+          {
+            "name": "SsdRead",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2056
+          },
+          {
+            "name": "SsdWrite",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2060
+          },
+          {
+            "name": "EvictionTrigger",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2064
+          },
+          {
+            "name": "EvictionHit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2068
+          },
+          {
+            "name": "EvictionDone",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2072
+          },
+          {
+            "name": "FreePage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2076
+          },
+          {
+            "name": "DirtyPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2080
+          },
+          {
+            "name": "ValidPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2084
+          },
+          {
+            "name": "PinnedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2088
+          },
+          {
+            "name": "PendingPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2092
+          },
+          {
+            "name": "PreloadedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2096
+          },
+          {
+            "name": "PrefetchByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "PinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "UnpinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "UnpinAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 48
+          },
+          {
+            "name": "PreloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 64
+          },
+          {
+            "name": "UnloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 80
+          },
+          {
+            "name": "UnloadAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 96
+          },
+          {
+            "name": "UnmapByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 112
+          },
+          {
+            "name": "CommitByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 128
+          },
+          {
+            "name": "FlushByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 144
+          },
+          {
+            "name": "TotalPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2100
+          },
+          {
+            "name": "ReservedPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2104
+          },
+          {
+            "name": "PinThreshold",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2108
+          },
+          {
+            "name": "AutoPrefetchGroupCount",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2112,
+            "reduce": "max"
+          },
+          {
+            "name": "SpnGroupBytes",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024,
+            "reduce": "max"
+          },
+          {
+            "name": "AutoPrefetchHit",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032
+          },
+          {
+            "name": "AutoPrefetchIssued",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "AutoPrefetchOstqFull",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "AutoPrefetchEnable",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "CommandReceive",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "MainIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "MainIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "BackgroundIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "BackgroundIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "EvictionOstqMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104,
+            "reduce": "max"
+          },
+          {
+            "name": "WaitingCommandMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112,
+            "reduce": "max"
+          },
+          {
+            "name": "EvictionOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120
+          },
+          {
+            "name": "ReadOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "PageAllocEmpty",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "PageAllocWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "BackgroundFreePageWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "SmcFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160
+          },
+          {
+            "name": "SmcClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168
+          },
+          {
+            "name": "SmcDirty",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "EvictionOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2116
+          },
+          {
+            "name": "WriteOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2120
+          },
+          {
+            "name": "ReadOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2124
+          },
+          {
+            "name": "DevicePrefetchOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2128
+          }
+        ],
+        "router": [
+          {
+            "name": "PrefetchCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "PinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "UnpinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "UnpinAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PreloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "UnloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "UnloadAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "UnmapCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "PrefetchSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "CommitCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "CommitSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FlushCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SystemCommandCount",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "DramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "PinThreshold",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "PrefetchInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "UnpinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "UnpinAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "PreloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "UnloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "UnloadAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1048
+          },
+          {
+            "name": "UnmapInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1052
+          },
+          {
+            "name": "CommitInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1056
+          },
+          {
+            "name": "FlushInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1060
+          }
+        ],
+        "arbitrator": [
+          {
+            "name": "SmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "SmcForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "CommandReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "CommandForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PageAllocRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "PageAllocResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "SmcMasterReturnPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "SmcPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "CommandInputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "RelocatorCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "StorageCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "SmcPendingBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SmcOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "PageAllocOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "SmcReceivePageFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "SmcReceiveDirtyVictim",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "SmcReceiveTlbClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "SmcReceiveOther",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          }
+        ],
+        "storage": [
+          {
+            "name": "NvmeReadCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "NvmeWriteCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032
+          },
+          {
+            "name": "NvmeReadBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "NvmeWriteBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "NvmeIssue",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "NvmeComplete",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "RelocatorRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "RelocatorResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "SplitRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "PromotePromoted",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "PromoteMissed",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "MainQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "MainDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112
+          },
+          {
+            "name": "BackgroundDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120
+          },
+          {
+            "name": "MainQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "BackgroundQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "NvmeOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "TrackerOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "NvmeOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160,
+            "reduce": "max"
+          },
+          {
+            "name": "TrackerOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168,
+            "reduce": "max"
+          },
+          {
+            "name": "QueueFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "UnmapReceived",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "UnmapOutOfRangeCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1192
+          },
+          {
+            "name": "UnmapBitmapPending",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1200
+          },
+          {
+            "name": "UnmapBlockedRwCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1208
+          },
+          {
+            "name": "NvmeDsmCommands",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1216
+          },
+          {
+            "name": "NvmeDsmDeallocBytes",
+            "group": 4,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          }
+        ],
+        "detector": [
+          {
+            "name": "PrefetchMode",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PrefetchEnabled",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "DetectorThreshold",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "SeqHitCount",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "LastDetectorValue",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "LastFillCycles",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "DetectRun",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          }
+        ]
+      }
+    },
+    "2": {
+      "pool_reserve_bytes": 1024,
+      "ip_order": [
+        "relocator",
+        "storage",
+        "arbitrator",
+        "router",
+        "detector"
+      ],
+      "ips": {
+        "relocator": [
+          {
+            "name": "Hit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2048
+          },
+          {
+            "name": "Miss",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2052
+          },
+          {
+            "name": "SsdRead",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2056
+          },
+          {
+            "name": "SsdWrite",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2060
+          },
+          {
+            "name": "EvictionTrigger",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2064
+          },
+          {
+            "name": "EvictionHit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2068
+          },
+          {
+            "name": "EvictionDone",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2072
+          },
+          {
+            "name": "FreePage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2076
+          },
+          {
+            "name": "DirtyPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2080
+          },
+          {
+            "name": "ValidPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2084
+          },
+          {
+            "name": "PinnedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2088
+          },
+          {
+            "name": "PendingPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2092
+          },
+          {
+            "name": "PreloadedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2096
+          },
+          {
+            "name": "PrefetchByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "PinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "UnpinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "UnpinAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 48
+          },
+          {
+            "name": "PreloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 64
+          },
+          {
+            "name": "UnloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 80
+          },
+          {
+            "name": "UnloadAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 96
+          },
+          {
+            "name": "UnmapByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 112
+          },
+          {
+            "name": "CommitByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 128
+          },
+          {
+            "name": "FlushByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 144
+          },
+          {
+            "name": "TotalPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2100
+          },
+          {
+            "name": "ReservedPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2104
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "AutoPrefetchGroupCount",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2108,
+            "reduce": "max"
+          },
+          {
+            "name": "SpnGroupBytes",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032,
+            "reduce": "max"
+          },
+          {
+            "name": "AutoPrefetchHit",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "AutoPrefetchIssued",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "AutoPrefetchOstqFull",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "AutoPrefetchEnable",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "CommandReceive",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "MainIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "MainIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "BackgroundIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "EvictionOstqMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112,
+            "reduce": "max"
+          },
+          {
+            "name": "WaitingCommandMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120,
+            "reduce": "max"
+          },
+          {
+            "name": "EvictionOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "ReadOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "PageAllocEmpty",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "PageAllocWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "BackgroundFreePageWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160
+          },
+          {
+            "name": "SmcFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168
+          },
+          {
+            "name": "SmcClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "SmcDirty",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "EvictionOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2112
+          },
+          {
+            "name": "WriteOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2116
+          },
+          {
+            "name": "ReadOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2120
+          },
+          {
+            "name": "DevicePrefetchOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2124
+          }
+        ],
+        "router": [
+          {
+            "name": "PrefetchCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "PinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "UnpinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "UnpinAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PreloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "UnloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "UnloadAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "UnmapCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "PrefetchSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "CommitCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "CommitSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FlushCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SystemCommandCount",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "DramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "MaxDramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "MaxPinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "PrefetchInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "UnpinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "UnpinAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "PreloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "UnloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "UnloadAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1048
+          },
+          {
+            "name": "UnmapInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1052
+          },
+          {
+            "name": "CommitInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1056
+          },
+          {
+            "name": "FlushInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1060
+          }
+        ],
+        "arbitrator": [
+          {
+            "name": "SmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "SmcForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "CommandReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "CommandForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PageAllocRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "PageAllocResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "SmcMasterReturnPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "SmcPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "CommandInputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "RelocatorCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "StorageCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "SmcPendingBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SmcOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "PageAllocOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "SmcReceivePageFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "SmcReceiveDirtyVictim",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "SmcReceiveTlbClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "SmcReceiveOther",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          }
+        ],
+        "storage": [
+          {
+            "name": "NvmeReadCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "NvmeWriteCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032
+          },
+          {
+            "name": "NvmeReadBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "NvmeWriteBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "NvmeIssue",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "NvmeComplete",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "RelocatorRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "RelocatorResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "SplitRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "PromotePromoted",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "PromoteMissed",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "MainQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "MainDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112
+          },
+          {
+            "name": "BackgroundDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120
+          },
+          {
+            "name": "MainQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "BackgroundQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "NvmeOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "TrackerOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "NvmeOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160,
+            "reduce": "max"
+          },
+          {
+            "name": "TrackerOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168,
+            "reduce": "max"
+          },
+          {
+            "name": "QueueFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "UnmapReceived",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "UnmapOutOfRangeCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1192
+          },
+          {
+            "name": "UnmapBitmapPending",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1200
+          },
+          {
+            "name": "UnmapBlockedRwCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1208
+          },
+          {
+            "name": "NvmeDsmCommands",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1216
+          },
+          {
+            "name": "NvmeDsmDeallocBytes",
+            "group": 4,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          }
+        ],
+        "detector": [
+          {
+            "name": "PrefetchMode",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PrefetchEnabled",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "DetectorThreshold",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "SeqHitCount",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "LastDetectorValue",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "LastFillCycles",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "DetectRun",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          }
+        ]
+      }
+    },
+    "3": {
+      "pool_reserve_bytes": 1024,
+      "ip_order": [
+        "relocator",
+        "storage",
+        "arbitrator",
+        "router",
+        "detector",
+        "scheduler"
+      ],
+      "ips": {
+        "relocator": [
+          {
+            "name": "Hit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2048
+          },
+          {
+            "name": "Miss",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2052
+          },
+          {
+            "name": "SsdRead",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2056
+          },
+          {
+            "name": "SsdWrite",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2060
+          },
+          {
+            "name": "EvictionTrigger",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2064
+          },
+          {
+            "name": "EvictionHit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2068
+          },
+          {
+            "name": "EvictionDone",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2072
+          },
+          {
+            "name": "FreePage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2076
+          },
+          {
+            "name": "DirtyPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2080
+          },
+          {
+            "name": "ValidPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2084
+          },
+          {
+            "name": "PinnedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2088
+          },
+          {
+            "name": "PendingPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2092
+          },
+          {
+            "name": "PreloadedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2096
+          },
+          {
+            "name": "PrefetchByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "PinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "UnpinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "UnpinAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 48
+          },
+          {
+            "name": "PreloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 64
+          },
+          {
+            "name": "UnloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 80
+          },
+          {
+            "name": "UnloadAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 96
+          },
+          {
+            "name": "UnmapByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 112
+          },
+          {
+            "name": "CommitByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 128
+          },
+          {
+            "name": "FlushByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 144
+          },
+          {
+            "name": "TotalPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2100
+          },
+          {
+            "name": "ReservedPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2104
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "AutoPrefetchGroupCount",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2108,
+            "reduce": "max"
+          },
+          {
+            "name": "SpnGroupBytes",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032,
+            "reduce": "max"
+          },
+          {
+            "name": "AutoPrefetchHit",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "AutoPrefetchIssued",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "AutoPrefetchOstqFull",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "AutoPrefetchEnable",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "CommandReceive",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "MainIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "MainIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "BackgroundIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "EvictionOstqMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112,
+            "reduce": "max"
+          },
+          {
+            "name": "WaitingCommandMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120,
+            "reduce": "max"
+          },
+          {
+            "name": "EvictionOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "ReadOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "PageAllocEmpty",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "PageAllocWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "BackgroundFreePageWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160
+          },
+          {
+            "name": "SmcFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168
+          },
+          {
+            "name": "SmcClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "SmcDirty",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "EvictionOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2112
+          },
+          {
+            "name": "WriteOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2116
+          },
+          {
+            "name": "ReadOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2120
+          },
+          {
+            "name": "DevicePrefetchOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2124
+          }
+        ],
+        "router": [
+          {
+            "name": "PrefetchCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "PinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "UnpinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "UnpinAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PreloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "UnloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "UnloadAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "UnmapCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "PrefetchSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "CommitCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "CommitSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FlushCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SystemCommandCount",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "DramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "MaxDramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "MaxPinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "PrefetchInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "UnpinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "UnpinAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "PreloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "UnloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "UnloadAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1048
+          },
+          {
+            "name": "UnmapInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1052
+          },
+          {
+            "name": "CommitInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1056
+          },
+          {
+            "name": "FlushInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1060
+          }
+        ],
+        "arbitrator": [
+          {
+            "name": "SmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "SmcForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "CommandReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "CommandForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PageAllocRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "PageAllocResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "SmcMasterReturnPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "SmcPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "CommandInputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "RelocatorCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "StorageCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "SmcPendingBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SmcOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "PageAllocOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "SmcReceivePageFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "SmcReceiveDirtyVictim",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "SmcReceiveTlbClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "SmcReceiveOther",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          }
+        ],
+        "storage": [
+          {
+            "name": "NvmeReadCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "NvmeWriteCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032
+          },
+          {
+            "name": "NvmeReadBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "NvmeWriteBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "NvmeIssue",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "NvmeComplete",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "RelocatorRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "RelocatorResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "SplitRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "PromotePromoted",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "PromoteMissed",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "MainQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "MainDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112
+          },
+          {
+            "name": "BackgroundDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120
+          },
+          {
+            "name": "MainQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "BackgroundQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "NvmeOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "TrackerOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "NvmeOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160,
+            "reduce": "max"
+          },
+          {
+            "name": "TrackerOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168,
+            "reduce": "max"
+          },
+          {
+            "name": "QueueFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "UnmapReceived",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "UnmapOutOfRangeCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1192
+          },
+          {
+            "name": "UnmapBitmapPending",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1200
+          },
+          {
+            "name": "UnmapBlockedRwCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1208
+          },
+          {
+            "name": "NvmeDsmCommands",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1216
+          },
+          {
+            "name": "NvmeDsmDeallocBytes",
+            "group": 4,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "NvmeReadLatencyBucket0",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1224
+          },
+          {
+            "name": "NvmeReadLatencyBucket1",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1232
+          },
+          {
+            "name": "NvmeReadLatencyBucket2",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1240
+          },
+          {
+            "name": "NvmeReadLatencyBucket3",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1248
+          },
+          {
+            "name": "NvmeReadLatencyBucket4",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1256
+          },
+          {
+            "name": "NvmeReadLatencyBucket5",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1264
+          },
+          {
+            "name": "NvmeReadLatencyBucket6",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1272
+          },
+          {
+            "name": "NvmeReadLatencyBucket7",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1280
+          },
+          {
+            "name": "NvmeReadLatencyBucket8",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1288
+          },
+          {
+            "name": "NvmeReadLatencyBucket9",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1296
+          },
+          {
+            "name": "NvmeReadLatencyBucket10",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1304
+          },
+          {
+            "name": "NvmeReadLatencyBucket11",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1312
+          },
+          {
+            "name": "NvmeReadLatencyBucket12",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1320
+          },
+          {
+            "name": "NvmeReadLatencyBucket13",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1328
+          },
+          {
+            "name": "NvmeReadLatencyBucket14",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1336
+          },
+          {
+            "name": "NvmeReadLatencyBucket15",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1344
+          },
+          {
+            "name": "NvmeReadLatencySumTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1352
+          },
+          {
+            "name": "NvmeReadLatencyMaxTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1360,
+            "reduce": "max"
+          },
+          {
+            "name": "NvmeWriteLatencyBucket0",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1368
+          },
+          {
+            "name": "NvmeWriteLatencyBucket1",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1376
+          },
+          {
+            "name": "NvmeWriteLatencyBucket2",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1384
+          },
+          {
+            "name": "NvmeWriteLatencyBucket3",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1392
+          },
+          {
+            "name": "NvmeWriteLatencyBucket4",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1400
+          },
+          {
+            "name": "NvmeWriteLatencyBucket5",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1408
+          },
+          {
+            "name": "NvmeWriteLatencyBucket6",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1416
+          },
+          {
+            "name": "NvmeWriteLatencyBucket7",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1424
+          },
+          {
+            "name": "NvmeWriteLatencyBucket8",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1432
+          },
+          {
+            "name": "NvmeWriteLatencyBucket9",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1440
+          },
+          {
+            "name": "NvmeWriteLatencyBucket10",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1448
+          },
+          {
+            "name": "NvmeWriteLatencyBucket11",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1456
+          },
+          {
+            "name": "NvmeWriteLatencyBucket12",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1464
+          },
+          {
+            "name": "NvmeWriteLatencyBucket13",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1472
+          },
+          {
+            "name": "NvmeWriteLatencyBucket14",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1480
+          },
+          {
+            "name": "NvmeWriteLatencyBucket15",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1488
+          },
+          {
+            "name": "NvmeWriteLatencySumTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1496
+          },
+          {
+            "name": "NvmeWriteLatencyMaxTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1504,
+            "reduce": "max"
+          }
+        ],
+        "detector": [
+          {
+            "name": "PrefetchMode",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PrefetchEnabled",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "DetectorThreshold",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "SeqHitCount",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "LastDetectorValue",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "LastFillCycles",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "DetectRun",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          }
+        ],
+        "scheduler": [
+          {
+            "name": "MasterSmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "MasterSmcPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "MasterSmcTlbClear",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "MasterSmcDirtyVictim",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "RelocatorFaultForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "RelocatorDirtyVictimForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "FaultLatencyBucket0",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "FaultLatencyBucket1",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "FaultLatencyBucket2",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "FaultLatencyBucket3",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "FaultLatencyBucket4",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FaultLatencyBucket5",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "FaultLatencyBucket6",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "FaultLatencyBucket7",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "FaultLatencyBucket8",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "FaultLatencyBucket9",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "FaultLatencyBucket10",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "FaultLatencyBucket11",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          },
+          {
+            "name": "FaultLatencyBucket12",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 144
+          },
+          {
+            "name": "FaultLatencyBucket13",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 152
+          },
+          {
+            "name": "FaultLatencyBucket14",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 160
+          },
+          {
+            "name": "FaultLatencyBucket15",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 168
+          },
+          {
+            "name": "FaultLatencySumTicks",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 176
+          },
+          {
+            "name": "FaultLatencyMaxTicks",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 184,
+            "reduce": "max"
+          }
+        ]
+      }
+    },
+    "4": {
+      "pool_reserve_bytes": 1024,
+      "ip_order": [
+        "relocator",
+        "storage",
+        "arbitrator",
+        "router",
+        "detector",
+        "scheduler"
+      ],
+      "ips": {
+        "relocator": [
+          {
+            "name": "Hit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2048
+          },
+          {
+            "name": "Miss",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2052
+          },
+          {
+            "name": "SsdRead",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2056
+          },
+          {
+            "name": "SsdWrite",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2060
+          },
+          {
+            "name": "EvictionTrigger",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2064
+          },
+          {
+            "name": "EvictionHit",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2068
+          },
+          {
+            "name": "EvictionDone",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2072
+          },
+          {
+            "name": "FreePage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2076
+          },
+          {
+            "name": "DirtyPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2080
+          },
+          {
+            "name": "ValidPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2084
+          },
+          {
+            "name": "PinnedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2088
+          },
+          {
+            "name": "PendingPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2092
+          },
+          {
+            "name": "PreloadedPage",
+            "group": 0,
+            "type": "U32",
+            "size": 4,
+            "offset": 2096
+          },
+          {
+            "name": "PrefetchByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "PinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "UnpinByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "UnpinAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 48
+          },
+          {
+            "name": "PreloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 64
+          },
+          {
+            "name": "UnloadByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 80
+          },
+          {
+            "name": "UnloadAllByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 96
+          },
+          {
+            "name": "UnmapByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 112
+          },
+          {
+            "name": "DiscardByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 128
+          },
+          {
+            "name": "CommitByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 144
+          },
+          {
+            "name": "FlushByte",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 160
+          },
+          {
+            "name": "TotalPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2100
+          },
+          {
+            "name": "ReservedPage",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2104
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "AutoPrefetchGroupCount",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 2108,
+            "reduce": "max"
+          },
+          {
+            "name": "SpnGroupBytes",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032,
+            "reduce": "max"
+          },
+          {
+            "name": "AutoPrefetchHit",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "AutoPrefetchIssued",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "AutoPrefetchOstqFull",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "AutoPrefetchEnable",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "CommandReceive",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "MainIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "MainIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "BackgroundIssued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundIssuedDirect",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "EvictionOstqMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112,
+            "reduce": "max"
+          },
+          {
+            "name": "WaitingCommandMax",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120,
+            "reduce": "max"
+          },
+          {
+            "name": "EvictionOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "ReadOstqFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "PageAllocEmpty",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "PageAllocWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "BackgroundFreePageWait",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160
+          },
+          {
+            "name": "SmcFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168
+          },
+          {
+            "name": "SmcClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "SmcDirty",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "EvictionOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2112
+          },
+          {
+            "name": "WriteOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2116
+          },
+          {
+            "name": "ReadOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2120
+          },
+          {
+            "name": "DevicePrefetchOst",
+            "group": 5,
+            "type": "U32",
+            "size": 4,
+            "offset": 2124
+          }
+        ],
+        "router": [
+          {
+            "name": "PrefetchCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "PinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "UnpinCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "UnpinAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PreloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "UnloadCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "UnloadAllCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "UnmapCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "PrefetchSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "CommitCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "CommitSyncCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FlushCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "DiscardCommand",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "SystemCommandCount",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "DramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "MaxDramCapacity",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "PinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "MaxPinThresholdByte",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          },
+          {
+            "name": "DirtyWritebackThresholdPercent",
+            "group": 1,
+            "type": "U64",
+            "size": 8,
+            "offset": 144
+          },
+          {
+            "name": "PrefetchInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "UnpinInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "UnpinAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "PreloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "UnloadInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "UnloadAllInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1048
+          },
+          {
+            "name": "UnmapInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1052
+          },
+          {
+            "name": "CommitInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1056
+          },
+          {
+            "name": "FlushInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1060
+          },
+          {
+            "name": "DiscardInflight",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1064
+          }
+        ],
+        "arbitrator": [
+          {
+            "name": "SmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "SmcForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "CommandReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "CommandForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "PageAllocRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "PageAllocResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "SmcMasterReturnPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "SmcPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "CommandInputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "RelocatorCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "StorageCommandOutputPending",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "SmcPendingBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "SmcOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "PageAllocOutBufferFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "SmcReceivePageFault",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "SmcReceiveDirtyVictim",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "SmcReceiveTlbClear",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "SmcReceiveOther",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          }
+        ],
+        "storage": [
+          {
+            "name": "NvmeReadCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1024
+          },
+          {
+            "name": "NvmeWriteCommands",
+            "group": 0,
+            "type": "U64",
+            "size": 8,
+            "offset": 1032
+          },
+          {
+            "name": "NvmeReadBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 0
+          },
+          {
+            "name": "NvmeWriteBytes",
+            "group": 0,
+            "type": "U128",
+            "size": 16,
+            "offset": 16
+          },
+          {
+            "name": "NvmeIssue",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1040
+          },
+          {
+            "name": "NvmeComplete",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1048
+          },
+          {
+            "name": "RelocatorRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1056
+          },
+          {
+            "name": "RelocatorResponse",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1064
+          },
+          {
+            "name": "SplitRequest",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1072
+          },
+          {
+            "name": "PromotePromoted",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1080
+          },
+          {
+            "name": "PromoteMissed",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 1088
+          },
+          {
+            "name": "MainQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1096
+          },
+          {
+            "name": "BackgroundQueued",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1104
+          },
+          {
+            "name": "MainDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1112
+          },
+          {
+            "name": "BackgroundDispatched",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1120
+          },
+          {
+            "name": "MainQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1128
+          },
+          {
+            "name": "BackgroundQueueSize",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1136
+          },
+          {
+            "name": "NvmeOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1144
+          },
+          {
+            "name": "TrackerOutstanding",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1152
+          },
+          {
+            "name": "NvmeOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1160,
+            "reduce": "max"
+          },
+          {
+            "name": "TrackerOutstandingPeak",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1168,
+            "reduce": "max"
+          },
+          {
+            "name": "QueueFull",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 1176
+          },
+          {
+            "name": "UnmapReceived",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1184
+          },
+          {
+            "name": "UnmapOutOfRangeCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1192
+          },
+          {
+            "name": "UnmapBitmapPending",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1200
+          },
+          {
+            "name": "UnmapBlockedRwCount",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1208
+          },
+          {
+            "name": "NvmeDsmCommands",
+            "group": 4,
+            "type": "U64",
+            "size": 8,
+            "offset": 1216
+          },
+          {
+            "name": "NvmeDsmDeallocBytes",
+            "group": 4,
+            "type": "U128",
+            "size": 16,
+            "offset": 32
+          },
+          {
+            "name": "NvmeReadLatencyBucket0",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1224
+          },
+          {
+            "name": "NvmeReadLatencyBucket1",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1232
+          },
+          {
+            "name": "NvmeReadLatencyBucket2",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1240
+          },
+          {
+            "name": "NvmeReadLatencyBucket3",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1248
+          },
+          {
+            "name": "NvmeReadLatencyBucket4",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1256
+          },
+          {
+            "name": "NvmeReadLatencyBucket5",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1264
+          },
+          {
+            "name": "NvmeReadLatencyBucket6",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1272
+          },
+          {
+            "name": "NvmeReadLatencyBucket7",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1280
+          },
+          {
+            "name": "NvmeReadLatencyBucket8",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1288
+          },
+          {
+            "name": "NvmeReadLatencyBucket9",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1296
+          },
+          {
+            "name": "NvmeReadLatencyBucket10",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1304
+          },
+          {
+            "name": "NvmeReadLatencyBucket11",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1312
+          },
+          {
+            "name": "NvmeReadLatencyBucket12",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1320
+          },
+          {
+            "name": "NvmeReadLatencyBucket13",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1328
+          },
+          {
+            "name": "NvmeReadLatencyBucket14",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1336
+          },
+          {
+            "name": "NvmeReadLatencyBucket15",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1344
+          },
+          {
+            "name": "NvmeReadLatencySumTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1352
+          },
+          {
+            "name": "NvmeReadLatencyMaxTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1360,
+            "reduce": "max"
+          },
+          {
+            "name": "NvmeWriteLatencyBucket0",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1368
+          },
+          {
+            "name": "NvmeWriteLatencyBucket1",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1376
+          },
+          {
+            "name": "NvmeWriteLatencyBucket2",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1384
+          },
+          {
+            "name": "NvmeWriteLatencyBucket3",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1392
+          },
+          {
+            "name": "NvmeWriteLatencyBucket4",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1400
+          },
+          {
+            "name": "NvmeWriteLatencyBucket5",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1408
+          },
+          {
+            "name": "NvmeWriteLatencyBucket6",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1416
+          },
+          {
+            "name": "NvmeWriteLatencyBucket7",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1424
+          },
+          {
+            "name": "NvmeWriteLatencyBucket8",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1432
+          },
+          {
+            "name": "NvmeWriteLatencyBucket9",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1440
+          },
+          {
+            "name": "NvmeWriteLatencyBucket10",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1448
+          },
+          {
+            "name": "NvmeWriteLatencyBucket11",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1456
+          },
+          {
+            "name": "NvmeWriteLatencyBucket12",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1464
+          },
+          {
+            "name": "NvmeWriteLatencyBucket13",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1472
+          },
+          {
+            "name": "NvmeWriteLatencyBucket14",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1480
+          },
+          {
+            "name": "NvmeWriteLatencyBucket15",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1488
+          },
+          {
+            "name": "NvmeWriteLatencySumTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1496
+          },
+          {
+            "name": "NvmeWriteLatencyMaxTicks",
+            "group": 5,
+            "type": "U64",
+            "size": 8,
+            "offset": 1504,
+            "reduce": "max"
+          }
+        ],
+        "detector": [
+          {
+            "name": "PrefetchMode",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1024
+          },
+          {
+            "name": "PrefetchEnabled",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1028
+          },
+          {
+            "name": "DetectorThreshold",
+            "group": 1,
+            "type": "U32",
+            "size": 4,
+            "offset": 1032
+          },
+          {
+            "name": "SeqHitCount",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1036
+          },
+          {
+            "name": "LastDetectorValue",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1040
+          },
+          {
+            "name": "LastFillCycles",
+            "group": 2,
+            "type": "U32",
+            "size": 4,
+            "offset": 1044
+          },
+          {
+            "name": "DetectRun",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          }
+        ],
+        "scheduler": [
+          {
+            "name": "MasterSmcReceive",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 0
+          },
+          {
+            "name": "MasterSmcPageFault",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 8
+          },
+          {
+            "name": "MasterSmcTlbClear",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 16
+          },
+          {
+            "name": "MasterSmcDirtyVictim",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 24
+          },
+          {
+            "name": "RelocatorFaultForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 32
+          },
+          {
+            "name": "RelocatorDirtyVictimForward",
+            "group": 2,
+            "type": "U64",
+            "size": 8,
+            "offset": 40
+          },
+          {
+            "name": "FaultLatencyBucket0",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 48
+          },
+          {
+            "name": "FaultLatencyBucket1",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 56
+          },
+          {
+            "name": "FaultLatencyBucket2",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 64
+          },
+          {
+            "name": "FaultLatencyBucket3",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 72
+          },
+          {
+            "name": "FaultLatencyBucket4",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 80
+          },
+          {
+            "name": "FaultLatencyBucket5",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 88
+          },
+          {
+            "name": "FaultLatencyBucket6",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 96
+          },
+          {
+            "name": "FaultLatencyBucket7",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 104
+          },
+          {
+            "name": "FaultLatencyBucket8",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 112
+          },
+          {
+            "name": "FaultLatencyBucket9",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 120
+          },
+          {
+            "name": "FaultLatencyBucket10",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 128
+          },
+          {
+            "name": "FaultLatencyBucket11",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 136
+          },
+          {
+            "name": "FaultLatencyBucket12",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 144
+          },
+          {
+            "name": "FaultLatencyBucket13",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 152
+          },
+          {
+            "name": "FaultLatencyBucket14",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 160
+          },
+          {
+            "name": "FaultLatencyBucket15",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 168
+          },
+          {
+            "name": "FaultLatencySumTicks",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 176
+          },
+          {
+            "name": "FaultLatencyMaxTicks",
+            "group": 3,
+            "type": "U64",
+            "size": 8,
+            "offset": 184,
+            "reduce": "max"
+          }
+        ]
+      }
+    }
+  }
+}

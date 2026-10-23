@@ -1,0 +1,44 @@
+#!/bin/bash
+# ccma system-ram run: arm ccma on the IM node (SDK default 60%), enable the IM provider, check
+# that IM leaves ccma's chunks alone and still parks anonymous THPs; kernel log scan.
+set -u
+cd "$(dirname "$0")"
+DAX=${DAX:-dax0.0}
+PCT=${PCT:-60}
+DBG=/sys/kernel/debug
+IMCTL=/sys/class/mx_dma/mx_dma0_ioctl/im
+CCMA=/sys/devices/virtual/misc/ccma
+
+uname -r
+sudo test -e $DBG/im_soft_fault/quiesce || { echo "im_soft_fault test hooks missing"; exit 2; }
+if ! daxctl list -d "$DAX" | grep -q '"mode":"system-ram"'; then
+    # Where the kernel onlines hot-added memory itself (Ubuntu's default), daxctl needs --force
+    # and the memory lands in the zone the kernel picks (ZONE_NORMAL) instead of ZONE_MOVABLE.
+    force=""; [ "$(cat /sys/devices/system/memory/auto_online_blocks)" = offline ] || force=--force
+    sudo daxctl reconfigure-device --mode=system-ram $force "$DAX" > /dev/null || exit 2
+fi
+node=$(daxctl list -d "$DAX" | sed -n 's/.*"target_node":\([0-9]*\).*/\1/p')
+base=$(sudo cat /sys/bus/dax/devices/$DAX/resource)
+size=$(sudo cat /sys/bus/dax/devices/$DAX/size)
+
+start=$(sudo dmesg | wc -l)
+t0=$(date +%s)
+echo "$PCT" | sudo tee $CCMA/reserve_pct > /dev/null || exit 2
+echo "ccma armed to $PCT% in $(( $(date +%s) - t0 ))s: total_chunks=$(cat $CCMA/total_chunks) failed_windows=$(cat $CCMA/failed_windows)"
+
+echo 1 | sudo tee $IMCTL/enable > /dev/null || exit 2
+
+bin=$(mktemp -d) || exit 2
+trap 'rm -rf "$bin"' EXIT
+gcc -O1 -pthread -Wall -o "$bin/im_ccma_test" im_ccma_test.c || exit 2
+sudo "$bin/im_ccma_test" "$node" $(( base >> 12 )) $(( size >> 12 ))
+rc=$?
+echo 0 | sudo tee $IMCTL/enable > /dev/null
+echo 0 | sudo tee $CCMA/reserve_pct > /dev/null
+sudo dmesg | tail -n +"$((start + 1))" > dmesg_ccma.log
+bad=$(grep -c -E 'WARNING|BUG|lockdep|circular locking|sleeping function|Oops|RCU stall|hung_task' dmesg_ccma.log || true)
+echo "kernel log lines during test: $(wc -l < dmesg_ccma.log), warnings: $bad"
+grep -E 'ccma' dmesg_ccma.log | tail -5
+[ "$bad" -eq 0 ] || rc=1
+echo "EXIT=$rc"
+exit "$rc"
