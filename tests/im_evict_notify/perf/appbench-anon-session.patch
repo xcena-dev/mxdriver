@@ -1,0 +1,79 @@
+--- a/bench/apps/appbench.cpp
++++ b/bench/apps/appbench.cpp
+@@ -370,9 +370,35 @@
+             double(avail) / kGiB);
+ }
+ 
++// --region anon:<node>: private anonymous THPs bound to that NUMA node, for host-paged IM, which parks anonymous
++// THPs. One mapping per process, so the kv-session cells read what the session's kv-load wrote.
++static char *map_anon(const std::string &path, uint64_t off, uint64_t len) {
++    static char *base = nullptr;
++    static uint64_t mapped = 0;
++    if (base) {
++        if (off + len > mapped) die("%s: %.2f GiB mapped, need %.2f GiB", path.c_str(), double(mapped) / kGiB,
++                                    double(off + len) / kGiB);
++        return base + off;
++    }
++    char *end;
++    long node = strtol(path.c_str() + 5, &end, 10);
++    if (end == path.c_str() + 5 || *end || node < 0 || node >= 1024) die("%s: expected anon:<numa node>", path.c_str());
++    mapped = off + len;
++    void *p = mmap(nullptr, mapped + kWin, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (p == MAP_FAILED) die("mmap %.2f GiB: %s", double(mapped) / kGiB, strerror(errno));
++    base = reinterpret_cast<char *>((reinterpret_cast<uintptr_t>(p) + kWin - 1) & ~(kWin - 1));
++    unsigned long nodes[1024 / 64] = {};
++    nodes[node / 64] = 1ul << (node % 64);
++    if (madvise(base, mapped, MADV_HUGEPAGE)) die("madvise(MADV_HUGEPAGE): %s", strerror(errno));
++    if (syscall(SYS_mbind, base, mapped, 2 /* MPOL_BIND */, nodes, 1024, 0))
++        die("mbind node %ld: %s", node, strerror(errno));
++    return base + off;
++}
++
+ // O_RDWR + MAP_SHARED, no MAP_POPULATE: windows fault in on first touch.
+ static char *map_region(const std::string &path, uint64_t off, uint64_t len) {
+     len = (len + kWin - 1) / kWin * kWin;  // imdaxfs maps whole 2 MiB windows and rejects shorter lengths with EINVAL
++    if (path.rfind("anon:", 0) == 0) return map_anon(path, off, len);
+     int fd = open(path.c_str(), O_RDWR);
+     if (fd < 0) die("open %s: %s", path.c_str(), strerror(errno));
+     struct stat st;
+@@ -3639,8 +3665,33 @@
+     return 0;
+ }
+ 
+-int main(int argc, char **argv) {
++static int run_command(int argc, char **argv);
++
++// Runs the commands read from stdin, one per line, in this process; a line starting with '!' goes to the shell and
++// must succeed. With --region anon:<node>, every cell reads the data the session's kv-load wrote.
++static int cmd_kv_session(Args &a) {
++    a.finish();
++    char line[4096];
++    int rc = 0;
++    while (fgets(line, sizeof line, stdin)) {
++        line[strcspn(line, "\n")] = 0;
++        if (!line[0] || line[0] == '#') continue;
++        fflush(stdout);
++        if (line[0] == '!') {
++            int st = system(line + 1);
++            if (st) die("kv-session: '%s' exited with status %d", line + 1, st);
++            continue;
++        }
++        std::vector<char *> argv{const_cast<char *>("appbench")};
++        for (char *t = strtok(line, " \t"); t; t = strtok(nullptr, " \t")) argv.push_back(t);
++        rc |= run_command(int(argv.size()), argv.data());
++    }
++    return rc;
++}
++
++static int run_command(int argc, char **argv) {
+     static const std::map<std::string, int (*)(Args &)> cmds = {
++        {"kv-session", cmd_kv_session},
+         {"kv-load", cmd_kv_load}, {"kv-run", cmd_kv_run}, {"kv-target", cmd_kv_target}, {"kv-timeline", cmd_kv_timeline}, {"now-ns", cmd_now_ns},   {"kv-open", cmd_kv_open},     {"vec-load", cmd_vec_load},
+         {"vec-search", cmd_vec_search}, {"kv-reuse", cmd_kv_reuse},
+         {"cpu", cmd_cpu},         {"chase", cmd_chase},     {"fill", cmd_fill},           {"gap-scale", cmd_gap_scale},
+@@ -3658,3 +3709,5 @@
+     Args a(argc, argv);
+     return it->second(a);
+ }
++
++int main(int argc, char **argv) { return run_command(argc, argv); }
