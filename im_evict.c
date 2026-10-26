@@ -31,6 +31,11 @@
 #define IM_SUB_GET_EVICT_EVENTS	12
 #define IM_SUB_SET_EVICT_NOTIFY	13
 #define IM_SUB_EVICT_REPLY	14
+#define IM_SUB_EVICT_REPLY_BATCH	15
+/* The firmware answers each verdict of a batch with a status byte here in the command page. */
+#define IM_REPLY_RESULT_OFFSET	128
+#define IM_REPLY_BATCH_MAX	\
+	min(IM_HIO_PAYLOAD / sizeof(u64), IM_HIO_CMD_PAGE - IM_REPLY_RESULT_OFFSET)
 #define IM_PREFETCH_SYNC	8
 #define IM_SPN_SHIFT		16
 #define IM_SPNS_PER_GROUP	8
@@ -97,6 +102,11 @@ static bool im_cache_backdoor;
 module_param(im_cache_backdoor, bool, 0644);
 MODULE_PARM_DESC(im_cache_backdoor, "Write back CPU caches through the QEMU host-cache model (emulator only)");
 
+static unsigned int im_writeback_workers = 4;
+module_param(im_writeback_workers, uint, 0644);
+MODULE_PARM_DESC(im_writeback_workers,
+		 "Unbound workers that write back one poll's parked folios (1: one at a time)");
+
 struct mx_im {
 	struct mx_pci_dev *mx_pdev;
 	/* Held across a whole enable, disable or detach; none returns while another is midway. */
@@ -125,7 +135,8 @@ struct mx_im {
 	u32 replied_seq[IM_MAX_RELOCATORS][IM_MAX_SLOTS];
 
 	atomic64_t polls, poll_err, events, stale, dup, ack_untracked, ack_outside, ack_parked,
-		ack_already, nack, reply_settled, reply_err, fetches, fetch_err;
+		ack_already, nack, reply_settled, reply_err, reply_batch, reply_batch_err, fetches,
+		fetch_err;
 	atomic64_t poll_ns_max, poll_ns_total, fetch_ns_max, fetch_ns_total, wb_ns_max, wb_ns_total;
 };
 
@@ -246,13 +257,14 @@ static bool im_event_valid(struct mx_im *im, const struct im_event *ev)
 	return true;
 }
 
-static void im_reply(struct mx_im *im, const struct im_event *ev, bool ack, ktime_t polled_at)
+static u64 im_reply_value(const struct im_event *ev, bool ack)
 {
-	u64 value = ev->relocator_id | ((u64)ev->slot_idx << 8) | ((u64)ack << 16) |
-		    ((u64)ev->seq << 32);
-	int ret;
+	return ev->relocator_id | ((u64)ev->slot_idx << 8) | ((u64)ack << 16) |
+	       ((u64)ev->seq << 32);
+}
 
-	ret = im_hio(im, IO_OPCODE_SEND, IM_SUB_EVICT_REPLY, value, 0);
+static void im_reply_done(struct mx_im *im, const struct im_event *ev, int ret, ktime_t polled_at)
+{
 	if (ret == -EINVAL) {
 		/* The firmware settled it first: it expired or a host command withdrew it. */
 		atomic64_inc(&im->reply_settled);
@@ -263,6 +275,47 @@ static void im_reply(struct mx_im *im, const struct im_event *ev, bool ack, ktim
 		atomic64_inc(&im->reply_err);
 	} else {
 		im->replied_seq[ev->relocator_id][ev->slot_idx] = ev->seq;
+	}
+}
+
+static void im_reply(struct mx_im *im, const struct im_event *ev, bool ack, ktime_t polled_at)
+{
+	int ret = im_hio(im, IO_OPCODE_SEND, IM_SUB_EVICT_REPLY, im_reply_value(ev, ack), 0);
+
+	im_reply_done(im, ev, ret, polled_at);
+}
+
+/* Answers events[idx[i]] with ack[i], as few HIO commands as the batch limit allows. */
+static void im_reply_many(struct mx_im *im, const struct im_event *events, const u32 *idx,
+			  const bool *ack, u32 n, ktime_t polled_at)
+{
+	const u8 *results;
+	u32 i, done, chunk;
+	u64 *values;
+	int ret;
+
+	for (done = 0; done < n; done += chunk) {
+		/* An abandoned transfer replaces the buffer, so look it up for every command. */
+		if (!im->buf)
+			return;
+		values = im->buf + IM_HIO_CMD_PAGE;
+		chunk = min_t(u32, n - done, IM_REPLY_BATCH_MAX);
+		for (i = 0; i < chunk; i++)
+			values[i] = im_reply_value(&events[idx[done + i]], ack[done + i]);
+		ret = im_hio(im, IO_OPCODE_SEND, IM_SUB_EVICT_REPLY_BATCH, chunk,
+			     chunk * sizeof(u64));
+		if (ret < 0) {
+			/* A firmware without the batch command refuses it whole: one by one. */
+			atomic64_inc(&im->reply_batch_err);
+			for (i = 0; i < chunk; i++)
+				im_reply(im, &events[idx[done + i]], ack[done + i], polled_at);
+			continue;
+		}
+		atomic64_inc(&im->reply_batch);
+		results = im->buf + IM_REPLY_RESULT_OFFSET;
+		for (i = 0; i < chunk; i++)
+			im_reply_done(im, &events[idx[done + i]],
+				      im_hio_status_to_errno(results[i]), polled_at);
 	}
 }
 
@@ -293,6 +346,54 @@ static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *
 	return verdict;
 }
 
+struct im_wb_chunk {
+	struct work_struct work;
+	struct mx_im *im;
+	const u64 *hpas;
+	u32 count;
+};
+
+static void im_wb_chunk_fn(struct work_struct *work)
+{
+	struct im_wb_chunk *c = container_of(work, struct im_wb_chunk, work);
+	u32 i;
+	u64 t0;
+
+	for (i = 0; i < c->count; i++) {
+		t0 = ktime_get_ns();
+		im_writeback(c->im, c->hpas[i], PMD_SIZE);
+		im_stat_time(&c->im->wb_ns_max, &c->im->wb_ns_total, ktime_get_ns() - t0);
+	}
+}
+
+/* Writes back the folios at hpas[] on up to im_writeback_workers unbound workers and waits. */
+static void im_writeback_many(struct mx_im *im, const u64 *hpas, u32 n)
+{
+	u32 workers = clamp_t(u32, READ_ONCE(im_writeback_workers), 1, 64);
+	u32 per = DIV_ROUND_UP(n, workers), i, nr = 0;
+	struct im_wb_chunk *chunks;
+
+	if (!n)
+		return;
+	chunks = kcalloc(DIV_ROUND_UP(n, per), sizeof(*chunks), GFP_KERNEL);
+	if (!chunks) {
+		struct im_wb_chunk one = { .im = im, .hpas = hpas, .count = n };
+
+		im_wb_chunk_fn(&one.work);
+		return;
+	}
+	for (i = 0; i < n; i += per, nr++) {
+		chunks[nr] = (struct im_wb_chunk){
+			.im = im, .hpas = hpas + i, .count = min(per, n - i),
+		};
+		INIT_WORK(&chunks[nr].work, im_wb_chunk_fn);
+		queue_work(system_unbound_wq, &chunks[nr].work);
+	}
+	for (i = 0; i < nr; i++)
+		flush_work(&chunks[i].work);
+	kfree(chunks);
+}
+
 /*
  * Answers that need no cache writeback go out first, so a slow writeback does not hold back
  * the rest of the batch; a parked folio is ACKed only after its writeback, and so are its groups.
@@ -301,35 +402,49 @@ static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32
 			    ktime_t polled_at)
 {
 	u8 *verdicts;
-	u64 hpa, t0;
-	u32 i;
+	bool *ack;
+	u32 *idx, i, n;
+	u64 *hpas, hpa;
 
 	verdicts = kcalloc(count, sizeof(*verdicts), GFP_KERNEL);
-	if (!verdicts)
-		return;
-	for (i = 0; i < count; i++) {
+	ack = kcalloc(count, sizeof(*ack), GFP_KERNEL);
+	idx = kcalloc(count, sizeof(*idx), GFP_KERNEL);
+	hpas = kcalloc(count, sizeof(*hpas), GFP_KERNEL);
+	if (!verdicts || !ack || !idx || !hpas)
+		goto out;
+	for (i = 0, n = 0; i < count; i++) {
 		verdicts[i] = U8_MAX;
 		if (!im_event_valid(im, &events[i]))
 			continue;
 		im_event_hpa(im, &events[i], &hpa);
 		verdicts[i] = im_decide(im, &events[i], hpa);
-		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED)
-			im_reply(im, &events[i], verdicts[i] == IM_EVICT_UNTRACKED, polled_at);
+		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED) {
+			idx[n] = i;
+			ack[n++] = verdicts[i] == IM_EVICT_UNTRACKED;
+		}
 	}
-	for (i = 0; i < count; i++) {
+	im_reply_many(im, events, idx, ack, n, polled_at);
+
+	/* The device must see every dirty line before it may drop its copy. */
+	for (i = 0, n = 0; i < count; i++) {
 		if (verdicts[i] != IM_EVICT_PARKED)
 			continue;
-		/* The device must see every dirty line before it may drop its copy. */
 		im_event_hpa(im, &events[i], &hpa);
-		t0 = ktime_get_ns();
-		im_writeback(im, ALIGN_DOWN(hpa, PMD_SIZE), PMD_SIZE);
-		im_stat_time(&im->wb_ns_max, &im->wb_ns_total, ktime_get_ns() - t0);
-		im_reply(im, &events[i], true, polled_at);
+		hpas[n++] = ALIGN_DOWN(hpa, PMD_SIZE);
 	}
-	for (i = 0; i < count; i++) {
-		if (verdicts[i] == IM_EVICT_ALREADY_PARKED)
-			im_reply(im, &events[i], true, polled_at);
+	im_writeback_many(im, hpas, n);
+
+	for (i = 0, n = 0; i < count; i++) {
+		if (verdicts[i] == IM_EVICT_PARKED || verdicts[i] == IM_EVICT_ALREADY_PARKED) {
+			idx[n] = i;
+			ack[n++] = true;
+		}
 	}
+	im_reply_many(im, events, idx, ack, n, polled_at);
+out:
+	kfree(hpas);
+	kfree(idx);
+	kfree(ack);
 	kfree(verdicts);
 }
 
@@ -824,8 +939,9 @@ static int im_stats_show(struct seq_file *m, void *v)
 	seq_printf(m, "ack_untracked=%lld ack_outside=%lld ack_parked=%lld ack_already=%lld nack=%lld",
 		   atomic64_read(&im->ack_untracked), atomic64_read(&im->ack_outside), parked,
 		   atomic64_read(&im->ack_already), atomic64_read(&im->nack));
-	seq_printf(m, " reply_settled=%lld reply_err=%lld\n", atomic64_read(&im->reply_settled),
-		   atomic64_read(&im->reply_err));
+	seq_printf(m, " reply_settled=%lld reply_err=%lld reply_batch=%lld reply_batch_err=%lld\n",
+		   atomic64_read(&im->reply_settled), atomic64_read(&im->reply_err),
+		   atomic64_read(&im->reply_batch), atomic64_read(&im->reply_batch_err));
 	seq_printf(m, "poll_us_avg=%lld poll_us_max=%lld wb_us_avg=%lld wb_us_max=%lld\n",
 		   polls ? atomic64_read(&im->poll_ns_total) / polls / 1000 : 0,
 		   atomic64_read(&im->poll_ns_max) / 1000,
