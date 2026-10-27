@@ -332,6 +332,7 @@ struct mx_bar_vma {
 };
 
 struct mx_queue;
+struct mx_im;
 
 struct mx_completion_info {
 	int id;
@@ -491,6 +492,9 @@ struct mx_pci_dev {
 	 * idle is still allowed so we don't force a polling-idle CPU.
 	 */
 	struct pm_qos_request cpu_latency_req;
+
+	/* Infinite Memory eviction notify; set from attach until the device's sysfs is gone. */
+	struct mx_im *im;
 };
 
 extern const struct file_operations *mxdma_fops_array[];
@@ -543,6 +547,30 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 				    uint8_t *out_status, uint64_t *out_host_addr);
 
 ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf, size_t size, int opcode);
+/* Transfers the driver issues on its own behalf: there is no file context, so no lease applies. */
+ssize_t mx_kxfer_protocol(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode);
+long mx_kxfer_passthru(struct mx_pci_dev *mx_pdev, int subopcode, uint64_t device_addr,
+		       uint64_t size, bool no_completion, uint8_t *out_status,
+		       uint64_t *out_host_addr);
+
+#if IS_ENABLED(CONFIG_IM_SOFT_FAULT)
+extern const struct attribute_group mx_im_group;
+void mx_im_attach(struct mx_pci_dev *mx_pdev);
+void mx_im_detach(struct mx_pci_dev *mx_pdev);
+void mx_im_free(struct mx_pci_dev *mx_pdev);
+#else
+static inline void mx_im_attach(struct mx_pci_dev *mx_pdev)
+{
+}
+
+static inline void mx_im_detach(struct mx_pci_dev *mx_pdev)
+{
+}
+
+static inline void mx_im_free(struct mx_pci_dev *mx_pdev)
+{
+}
+#endif
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);

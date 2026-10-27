@@ -607,7 +607,8 @@ static void mx_transfer_schedule_wait(struct mx_pci_dev *mx_pdev,
 static int mx_transfer_init_sg(struct mx_file_ctx *ctx,
 		struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
-	int ret = mx_lease_transfer_get(ctx, transfer);
+	/* In-kernel callers pass no file context and hold no lease. */
+	int ret = ctx ? mx_lease_transfer_get(ctx, transfer) : 0;
 
 	if (ret)
 		return ret;
@@ -962,14 +963,50 @@ ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf,
 			DMA_BIDIRECTIONAL, opcode, 1, false);
 }
 
+/* HIO Send/Recv on a physically contiguous kernel buffer. */
+ssize_t mx_kxfer_protocol(struct mx_pci_dev *mx_pdev, void *buf, size_t size, int opcode)
+{
+	struct mx_sg_context *ctx;
+	struct mx_transfer *transfer;
+	struct sg_table *sgt;
+
+	if (!size || !PAGE_ALIGNED(buf) || !virt_addr_valid(buf))
+		return -EINVAL;
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	refcount_set(&ctx->refcount, 1);
+	ctx->mx_pdev = mx_pdev;
+	ctx->dir = DMA_BIDIRECTIONAL;
+	ctx->total_size = size;
+	/* pages_nr stays 0: the buffer is not pinned, so release has nothing to unpin. */
+	ctx->pages = ctx->pages_inline;
+	sgt = &ctx->sgt;
+	sg_init_table(ctx->sg_inline, MX_PAGES_INLINE_NR);
+	sg_set_buf(&ctx->sg_inline[0], buf, size);
+	sgt->sgl = ctx->sg_inline;
+	sgt->orig_nents = 1;
+	sgt->nents = dma_map_sg(&mx_pdev->pdev->dev, sgt->sgl, sgt->orig_nents, ctx->dir);
+	if (!sgt->nents) {
+		mx_sg_context_put(ctx);
+		return -EIO;
+	}
+
+	transfer = alloc_mx_transfer_sg(ctx, 0, size, 0);
+	mx_sg_context_put(ctx);
+	if (!transfer)
+		return -ENOMEM;
+	return mx_transfer_submit_sg_one(NULL, mx_pdev, transfer, opcode, false);
+}
+
 /******************************************************************************/
 /* Passthrough command                                                        */
 /******************************************************************************/
-long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
-			     uint64_t device_addr, uint64_t size, bool no_completion,
-			     uint8_t *out_status, uint64_t *out_host_addr)
+static long __submit_passthru(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
+			      int subopcode, uint64_t device_addr, uint64_t size,
+			      bool no_completion, uint8_t *out_status, uint64_t *out_host_addr)
 {
-	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	struct mx_transfer *transfer;
 	long left_time;
 
@@ -979,7 +1016,8 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 	transfer = alloc_mx_transfer(NULL, size, device_addr, DMA_NONE);
 	if (!transfer)
 		return -ENOMEM;
-	{
+	/* In-kernel callers pass no file context and hold no lease. */
+	if (ctx) {
 		int ret = mx_lease_transfer_get(ctx, transfer);
 
 		if (ret) {
@@ -1066,6 +1104,22 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 
 	release_mx_transfer(transfer);
 	return 0;
+}
+
+long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
+			     uint64_t device_addr, uint64_t size, bool no_completion,
+			     uint8_t *out_status, uint64_t *out_host_addr)
+{
+	return __submit_passthru(ctx->mx_pdev, ctx, subopcode, device_addr, size,
+				 no_completion, out_status, out_host_addr);
+}
+
+long mx_kxfer_passthru(struct mx_pci_dev *mx_pdev, int subopcode, uint64_t device_addr,
+		       uint64_t size, bool no_completion, uint8_t *out_status,
+		       uint64_t *out_host_addr)
+{
+	return __submit_passthru(mx_pdev, NULL, subopcode, device_addr, size,
+				 no_completion, out_status, out_host_addr);
 }
 
 /******************************************************************************/
