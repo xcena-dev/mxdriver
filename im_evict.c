@@ -107,6 +107,10 @@ module_param(im_writeback_workers, uint, 0644);
 MODULE_PARM_DESC(im_writeback_workers,
 		 "Unbound workers that write back one poll's parked folios (1: one at a time)");
 
+static unsigned int im_reap_budget = 128;
+module_param(im_reap_budget, uint, 0644);
+MODULE_PARM_DESC(im_reap_budget, "Parked folios checked per 10 ms for unmapped ones (0: off)");
+
 struct mx_im {
 	struct mx_pci_dev *mx_pdev;
 	/* Held across a whole enable, disable or detach; none returns while another is midway. */
@@ -135,8 +139,8 @@ struct mx_im {
 	u32 replied_seq[IM_MAX_RELOCATORS][IM_MAX_SLOTS];
 
 	atomic64_t polls, poll_err, events, stale, dup, ack_untracked, ack_outside, ack_parked,
-		ack_already, nack, reply_settled, reply_err, reply_batch, reply_batch_err, fetches,
-		fetch_err;
+		ack_already, nack, reply_settled, reply_err, reply_batch, reply_batch_err, reaped,
+		fetches, fetch_err;
 	atomic64_t poll_ns_max, poll_ns_total, fetch_ns_max, fetch_ns_total, wb_ns_max, wb_ns_total;
 };
 
@@ -489,12 +493,19 @@ static int im_poll_once(struct mx_im *im)
 static int im_poll_thread(void *arg)
 {
 	struct mx_im *im = arg;
+	unsigned long next_reap = jiffies;
 
 	while (!kthread_should_stop()) {
+		unsigned int budget = READ_ONCE(im_reap_budget);
 		int handled;
 
 		mutex_lock(&im->lock);
 		handled = im->stopping ? 0 : im_poll_once(im);
+		/* Between batches, so no folio it frees is in the middle of a verdict. */
+		if (!im->stopping && budget && time_after_eq(jiffies, next_reap)) {
+			atomic64_add(im_soft_fault_reap(im->prov, budget), &im->reaped);
+			next_reap = jiffies + msecs_to_jiffies(10);
+		}
 		mutex_unlock(&im->lock);
 		if (handled <= 0)
 			msleep_interruptible(READ_ONCE(im_poll_ms));
@@ -939,6 +950,7 @@ static int im_stats_show(struct seq_file *m, void *v)
 	seq_printf(m, "ack_untracked=%lld ack_outside=%lld ack_parked=%lld ack_already=%lld nack=%lld",
 		   atomic64_read(&im->ack_untracked), atomic64_read(&im->ack_outside), parked,
 		   atomic64_read(&im->ack_already), atomic64_read(&im->nack));
+	seq_printf(m, " reaped=%lld", atomic64_read(&im->reaped));
 	seq_printf(m, " reply_settled=%lld reply_err=%lld reply_batch=%lld reply_batch_err=%lld\n",
 		   atomic64_read(&im->reply_settled), atomic64_read(&im->reply_err),
 		   atomic64_read(&im->reply_batch), atomic64_read(&im->reply_batch_err));
