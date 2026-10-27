@@ -107,6 +107,10 @@ module_param(im_writeback_workers, uint, 0644);
 MODULE_PARM_DESC(im_writeback_workers,
 		 "Unbound workers that write back one poll's parked folios (1: one at a time)");
 
+static bool im_clean_skip = true;
+module_param(im_clean_skip, bool, 0644);
+MODULE_PARM_DESC(im_clean_skip, "ACK a parked folio unwritten since its last writeback at once");
+
 static unsigned int im_reap_budget = 128;
 module_param(im_reap_budget, uint, 0644);
 MODULE_PARM_DESC(im_reap_budget, "Parked folios checked per 10 ms for unmapped ones (0: off)");
@@ -139,8 +143,8 @@ struct mx_im {
 	u32 replied_seq[IM_MAX_RELOCATORS][IM_MAX_SLOTS];
 
 	atomic64_t polls, poll_err, events, stale, dup, ack_untracked, ack_outside, ack_parked,
-		ack_already, nack, reply_settled, reply_err, reply_batch, reply_batch_err, reaped,
-		fetches, fetch_err;
+		ack_already, ack_clean, nack, reply_settled, reply_err, reply_batch,
+		reply_batch_err, writebacks, reaped, fetches, fetch_err;
 	atomic64_t poll_ns_max, poll_ns_total, fetch_ns_max, fetch_ns_total, wb_ns_max, wb_ns_total;
 };
 
@@ -337,6 +341,10 @@ static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *
 	case IM_EVICT_PARKED:
 		atomic64_inc(&im->ack_parked);
 		break;
+	case IM_EVICT_PARKED_CLEAN:
+		atomic64_inc(&im->ack_parked);
+		atomic64_inc(&im->ack_clean);
+		break;
 	case IM_EVICT_ALREADY_PARKED:
 		atomic64_inc(&im->ack_already);
 		break;
@@ -379,6 +387,7 @@ static void im_writeback_many(struct mx_im *im, const u64 *hpas, u32 n)
 
 	if (!n)
 		return;
+	atomic64_add(n, &im->writebacks);
 	chunks = kcalloc(DIV_ROUND_UP(n, per), sizeof(*chunks), GFP_KERNEL);
 	if (!chunks) {
 		struct im_wb_chunk one = { .im = im, .hpas = hpas, .count = n };
@@ -422,9 +431,12 @@ static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32
 			continue;
 		im_event_hpa(im, &events[i], &hpa);
 		verdicts[i] = im_decide(im, &events[i], hpa);
-		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED) {
+		if (verdicts[i] == IM_EVICT_PARKED_CLEAN && !READ_ONCE(im_clean_skip))
+			verdicts[i] = IM_EVICT_PARKED;
+		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED ||
+		    verdicts[i] == IM_EVICT_PARKED_CLEAN) {
 			idx[n] = i;
-			ack[n++] = verdicts[i] == IM_EVICT_UNTRACKED;
+			ack[n++] = verdicts[i] != IM_EVICT_REFUSED;
 		}
 	}
 	im_reply_many(im, events, idx, ack, n, polled_at);
@@ -938,6 +950,7 @@ static int im_stats_show(struct seq_file *m, void *v)
 	struct mx_im *im = m->private;
 	u64 polls = atomic64_read(&im->polls), fetches = atomic64_read(&im->fetches);
 	u64 parked = atomic64_read(&im->ack_parked);
+	u64 writebacks = atomic64_read(&im->writebacks);
 
 	seq_printf(m, "enabled=%d generation=%u ack_timeout_ms=%u poll_ms=%u\n", im->enabled,
 		   im->generation, READ_ONCE(im->ack_timeout_ms), READ_ONCE(im_poll_ms));
@@ -950,14 +963,15 @@ static int im_stats_show(struct seq_file *m, void *v)
 	seq_printf(m, "ack_untracked=%lld ack_outside=%lld ack_parked=%lld ack_already=%lld nack=%lld",
 		   atomic64_read(&im->ack_untracked), atomic64_read(&im->ack_outside), parked,
 		   atomic64_read(&im->ack_already), atomic64_read(&im->nack));
-	seq_printf(m, " reaped=%lld", atomic64_read(&im->reaped));
+	seq_printf(m, " ack_clean=%lld writebacks=%lld reaped=%lld", atomic64_read(&im->ack_clean),
+		   writebacks, atomic64_read(&im->reaped));
 	seq_printf(m, " reply_settled=%lld reply_err=%lld reply_batch=%lld reply_batch_err=%lld\n",
 		   atomic64_read(&im->reply_settled), atomic64_read(&im->reply_err),
 		   atomic64_read(&im->reply_batch), atomic64_read(&im->reply_batch_err));
 	seq_printf(m, "poll_us_avg=%lld poll_us_max=%lld wb_us_avg=%lld wb_us_max=%lld\n",
 		   polls ? atomic64_read(&im->poll_ns_total) / polls / 1000 : 0,
 		   atomic64_read(&im->poll_ns_max) / 1000,
-		   parked ? atomic64_read(&im->wb_ns_total) / parked / 1000 : 0,
+		   writebacks ? atomic64_read(&im->wb_ns_total) / writebacks / 1000 : 0,
 		   atomic64_read(&im->wb_ns_max) / 1000);
 	seq_printf(m, "fetches=%lld fetch_err=%lld fetch_us_avg=%lld fetch_us_max=%lld\n", fetches,
 		   atomic64_read(&im->fetch_err),
