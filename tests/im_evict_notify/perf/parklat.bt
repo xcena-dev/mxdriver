@@ -1,0 +1,11 @@
+// Park latency of the IM poller named by $1, in us: a batch of verdicts, try_to_migrate,
+// the batched TLB flush and PMD flushes, printed and cleared every 30 s.
+kprobe:im_soft_fault_evict_intents { @t0[tid] = nsecs; }
+kretprobe:im_soft_fault_evict_intents /@t0[tid]/ { @intent_us = hist((nsecs - @t0[tid]) / 1000); @n_intent = count(); delete(@t0[tid]); }
+kprobe:try_to_migrate /comm == str($1)/ { @t1[tid] = nsecs; }
+kretprobe:try_to_migrate /@t1[tid]/ { @migrate_us = hist((nsecs - @t1[tid]) / 1000); delete(@t1[tid]); }
+kprobe:try_to_unmap_flush /comm == str($1)/ { @t2[tid] = nsecs; }
+kretprobe:try_to_unmap_flush /@t2[tid]/ { @flush_us = hist((nsecs - @t2[tid]) / 1000); delete(@t2[tid]); }
+kprobe:flush_tlb_mm_range /comm == str($1)/ { @t3[tid] = nsecs; }
+kretprobe:flush_tlb_mm_range /@t3[tid]/ { @tlbrange_us = hist((nsecs - @t3[tid]) / 1000); delete(@t3[tid]); }
+interval:s:30 { time("%H:%M:%S\n"); print(@n_intent); print(@intent_us); print(@migrate_us); print(@flush_us); print(@tlbrange_us); clear(@n_intent); clear(@intent_us); clear(@migrate_us); clear(@flush_us); clear(@tlbrange_us); }
