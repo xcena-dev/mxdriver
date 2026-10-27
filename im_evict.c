@@ -327,7 +327,8 @@ static void im_reply_many(struct mx_im *im, const struct im_event *events, const
 	}
 }
 
-static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *ev, u64 hpa)
+static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *ev, u64 hpa,
+				       struct im_parked *parked)
 {
 	enum im_evict_verdict verdict;
 
@@ -336,7 +337,8 @@ static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *
 		atomic64_inc(&im->ack_outside);
 		return IM_EVICT_UNTRACKED;
 	}
-	verdict = im_soft_fault_evict_intent(im->prov, PHYS_PFN(hpa));
+	verdict = im_soft_fault_evict_intent(im->prov, PHYS_PFN(hpa), PHYS_PFN(IM_GROUP_BYTES),
+					     parked);
 	switch (verdict) {
 	case IM_EVICT_PARKED:
 		atomic64_inc(&im->ack_parked);
@@ -361,25 +363,27 @@ static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *
 struct im_wb_chunk {
 	struct work_struct work;
 	struct mx_im *im;
-	const u64 *hpas;
+	const struct im_parked *folios;
 	u32 count;
 };
 
 static void im_wb_chunk_fn(struct work_struct *work)
 {
 	struct im_wb_chunk *c = container_of(work, struct im_wb_chunk, work);
+	const struct im_parked *f;
 	u32 i;
 	u64 t0;
 
 	for (i = 0; i < c->count; i++) {
+		f = &c->folios[i];
 		t0 = ktime_get_ns();
-		im_writeback(c->im, c->hpas[i], PMD_SIZE);
+		im_writeback(c->im, PFN_PHYS(f->pfn), (u64)f->nr_pages << PAGE_SHIFT);
 		im_stat_time(&c->im->wb_ns_max, &c->im->wb_ns_total, ktime_get_ns() - t0);
 	}
 }
 
-/* Writes back the folios at hpas[] on up to im_writeback_workers unbound workers and waits. */
-static void im_writeback_many(struct mx_im *im, const u64 *hpas, u32 n)
+/* Writes back folios[] on up to im_writeback_workers unbound workers and waits. */
+static void im_writeback_many(struct mx_im *im, const struct im_parked *folios, u32 n)
 {
 	u32 workers = clamp_t(u32, READ_ONCE(im_writeback_workers), 1, 64);
 	u32 per = DIV_ROUND_UP(n, workers), i, nr = 0;
@@ -390,14 +394,14 @@ static void im_writeback_many(struct mx_im *im, const u64 *hpas, u32 n)
 	atomic64_add(n, &im->writebacks);
 	chunks = kcalloc(DIV_ROUND_UP(n, per), sizeof(*chunks), GFP_KERNEL);
 	if (!chunks) {
-		struct im_wb_chunk one = { .im = im, .hpas = hpas, .count = n };
+		struct im_wb_chunk one = { .im = im, .folios = folios, .count = n };
 
 		im_wb_chunk_fn(&one.work);
 		return;
 	}
 	for (i = 0; i < n; i += per, nr++) {
 		chunks[nr] = (struct im_wb_chunk){
-			.im = im, .hpas = hpas + i, .count = min(per, n - i),
+			.im = im, .folios = folios + i, .count = min(per, n - i),
 		};
 		INIT_WORK(&chunks[nr].work, im_wb_chunk_fn);
 		queue_work(system_unbound_wq, &chunks[nr].work);
@@ -414,23 +418,24 @@ static void im_writeback_many(struct mx_im *im, const u64 *hpas, u32 n)
 static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32 count,
 			    ktime_t polled_at)
 {
+	struct im_parked *parked;
 	u8 *verdicts;
 	bool *ack;
 	u32 *idx, i, n;
-	u64 *hpas, hpa;
+	u64 hpa;
 
 	verdicts = kcalloc(count, sizeof(*verdicts), GFP_KERNEL);
 	ack = kcalloc(count, sizeof(*ack), GFP_KERNEL);
 	idx = kcalloc(count, sizeof(*idx), GFP_KERNEL);
-	hpas = kcalloc(count, sizeof(*hpas), GFP_KERNEL);
-	if (!verdicts || !ack || !idx || !hpas)
+	parked = kcalloc(count, sizeof(*parked), GFP_KERNEL);
+	if (!verdicts || !ack || !idx || !parked)
 		goto out;
 	for (i = 0, n = 0; i < count; i++) {
 		verdicts[i] = U8_MAX;
 		if (!im_event_valid(im, &events[i]))
 			continue;
 		im_event_hpa(im, &events[i], &hpa);
-		verdicts[i] = im_decide(im, &events[i], hpa);
+		verdicts[i] = im_decide(im, &events[i], hpa, &parked[i]);
 		if (verdicts[i] == IM_EVICT_PARKED_CLEAN && !READ_ONCE(im_clean_skip))
 			verdicts[i] = IM_EVICT_PARKED;
 		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED ||
@@ -443,12 +448,10 @@ static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32
 
 	/* The device must see every dirty line before it may drop its copy. */
 	for (i = 0, n = 0; i < count; i++) {
-		if (verdicts[i] != IM_EVICT_PARKED)
-			continue;
-		im_event_hpa(im, &events[i], &hpa);
-		hpas[n++] = ALIGN_DOWN(hpa, PMD_SIZE);
+		if (verdicts[i] == IM_EVICT_PARKED)
+			parked[n++] = parked[i];
 	}
-	im_writeback_many(im, hpas, n);
+	im_writeback_many(im, parked, n);
 
 	for (i = 0, n = 0; i < count; i++) {
 		if (verdicts[i] == IM_EVICT_PARKED || verdicts[i] == IM_EVICT_ALREADY_PARKED) {
@@ -458,7 +461,7 @@ static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32
 	}
 	im_reply_many(im, events, idx, ack, n, polled_at);
 out:
-	kfree(hpas);
+	kfree(parked);
 	kfree(idx);
 	kfree(ack);
 	kfree(verdicts);
@@ -731,7 +734,7 @@ static int im_find_range(struct mx_im *im)
 		snprintf(path, sizeof(path), IM_CXL_DEVICES "/%s/dpa_resource", decoder);
 		if (im_read_u64(path, &im->dpa_base))
 			break;
-		/* Otherwise an eviction group could straddle two THPs, and only one would be parked. */
+		/* Otherwise a group could straddle two folios, and only one would be parked. */
 		if (!IS_ALIGNED(im->region_base - im->dpa_base, IM_GROUP_BYTES)) {
 			ret = -EOPNOTSUPP;
 			break;
