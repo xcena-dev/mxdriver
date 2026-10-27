@@ -327,18 +327,8 @@ static void im_reply_many(struct mx_im *im, const struct im_event *events, const
 	}
 }
 
-static enum im_evict_verdict im_decide(struct mx_im *im, const struct im_event *ev, u64 hpa,
-				       struct im_parked *parked)
+static enum im_evict_verdict im_count_verdict(struct mx_im *im, enum im_evict_verdict verdict)
 {
-	enum im_evict_verdict verdict;
-
-	/* Device memory that is not system RAM here (devdax) has no host folio to park. */
-	if (hpa < im->ram_base || hpa - im->ram_base >= im->ram_size) {
-		atomic64_inc(&im->ack_outside);
-		return IM_EVICT_UNTRACKED;
-	}
-	verdict = im_soft_fault_evict_intent(im->prov, PHYS_PFN(hpa), PHYS_PFN(IM_GROUP_BYTES),
-					     parked);
 	switch (verdict) {
 	case IM_EVICT_PARKED:
 		atomic64_inc(&im->ack_parked);
@@ -418,24 +408,41 @@ static void im_writeback_many(struct mx_im *im, const struct im_parked *folios, 
 static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32 count,
 			    ktime_t polled_at)
 {
+	struct im_intent *intents;
 	struct im_parked *parked;
 	u8 *verdicts;
 	bool *ack;
-	u32 *idx, i, n;
+	u32 *idx, i, j, n;
 	u64 hpa;
 
 	verdicts = kcalloc(count, sizeof(*verdicts), GFP_KERNEL);
 	ack = kcalloc(count, sizeof(*ack), GFP_KERNEL);
 	idx = kcalloc(count, sizeof(*idx), GFP_KERNEL);
 	parked = kcalloc(count, sizeof(*parked), GFP_KERNEL);
-	if (!verdicts || !ack || !idx || !parked)
+	intents = kcalloc(count, sizeof(*intents), GFP_KERNEL);
+	if (!verdicts || !ack || !idx || !parked || !intents)
 		goto out;
 	for (i = 0, n = 0; i < count; i++) {
 		verdicts[i] = U8_MAX;
 		if (!im_event_valid(im, &events[i]))
 			continue;
 		im_event_hpa(im, &events[i], &hpa);
-		verdicts[i] = im_decide(im, &events[i], hpa, &parked[i]);
+		/* Device memory that is not system RAM here (devdax) has no host folio to park. */
+		if (hpa < im->ram_base || hpa - im->ram_base >= im->ram_size) {
+			atomic64_inc(&im->ack_outside);
+			verdicts[i] = IM_EVICT_UNTRACKED;
+			continue;
+		}
+		intents[n].pfn = PHYS_PFN(hpa);
+		idx[n++] = i;
+	}
+	im_soft_fault_evict_intents(im->prov, PHYS_PFN(IM_GROUP_BYTES), intents, n);
+	for (j = 0; j < n; j++) {
+		verdicts[idx[j]] = im_count_verdict(im, intents[j].verdict);
+		parked[idx[j]] = intents[j].parked;
+	}
+
+	for (i = 0, n = 0; i < count; i++) {
 		if (verdicts[i] == IM_EVICT_PARKED_CLEAN && !READ_ONCE(im_clean_skip))
 			verdicts[i] = IM_EVICT_PARKED;
 		if (verdicts[i] == IM_EVICT_UNTRACKED || verdicts[i] == IM_EVICT_REFUSED ||
@@ -461,6 +468,7 @@ static void im_handle_batch(struct mx_im *im, const struct im_event *events, u32
 	}
 	im_reply_many(im, events, idx, ack, n, polled_at);
 out:
+	kfree(intents);
 	kfree(parked);
 	kfree(idx);
 	kfree(ack);
