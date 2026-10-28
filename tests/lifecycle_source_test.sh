@@ -189,5 +189,23 @@ if [ "$publisher_check" -ne 1 ]; then
     echo "every publisher acquisition must require host CAP_SYS_RAWIO" >&2
     exit 1
 fi
+# The kernel calls the class devnode after the type devnode with the same mode pointer,
+# so a mode set there would override dev_mode.
+type_devnode_block=$(sed -n '/^static char \*mxdma_type_devnode(/,/^}/p' init.c)
+class_devnode_block=$(sed -n '/^static char \*mxdma_devnode(/,/^}/p' init.c)
+[[ -n $type_devnode_block && -n $class_devnode_block ]]
+search_fixed 'mx_cdev->dev.type = &mxdma_cdev_type;' init.c
+if ! grep -Fq '*mode = dev_mode;' <<<"$type_devnode_block" ||
+   ! grep -Fq '*gid = KGIDT_INIT(dev_gid);' <<<"$type_devnode_block" ||
+   grep -Eq '\*mode[[:space:]]*=' <<<"$class_devnode_block"; then
+    echo "only the type devnode may set the node mode and gid" >&2
+    exit 1
+fi
+# devtmpfs deletes a node with NULL mode, uid and gid pointers, so each store needs its guard.
+if ! grep -Fq 'if (mode)' <<<"$type_devnode_block" || ! grep -Fq 'if (gid)' <<<"$type_devnode_block"; then
+    echo "the type devnode must check mode and gid for NULL" >&2
+    exit 1
+fi
+search_fixed 'if (dev_mode == 0 || dev_mode > 0777 || !gid_valid(KGIDT_INIT(dev_gid))) {' init.c
 
 echo "lifecycle source invariants: PASS"

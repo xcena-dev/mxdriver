@@ -8,6 +8,14 @@
 static struct class *mxdma_class;
 struct kmem_cache *mx_transfer_cache;
 
+/* Read-only after load: nodes are created with these,
+ * and userspace reads them back from sysfs to match the node access, so they are ABI.
+ * sysfs prints them in decimal (dev_mode 0660 reads 432). */
+static unsigned int dev_gid;
+module_param(dev_gid, uint, 0444);
+static unsigned int dev_mode = 0666;
+module_param(dev_mode, uint, 0444);
+
 /* CXL driver_data belongs to cxl_pci. Both modes use our own embedded
  * registry entries and refcounted allocations, never foreign devres. */
 static LIST_HEAD(mx_device_list_head);
@@ -469,6 +477,24 @@ static void mx_cdev_release(struct device *dev)
 	mx_pdev_put(mx_cdev->mx_pdev);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 3)
+static char *mxdma_type_devnode(struct device *dev, umode_t *mode, kuid_t *uid, kgid_t *gid)
+#else
+static char *mxdma_type_devnode(const struct device *dev, umode_t *mode, kuid_t *uid, kgid_t *gid)
+#endif
+{
+	if (mode)
+		*mode = dev_mode;
+	if (gid)
+		*gid = KGIDT_INIT(dev_gid);
+	/* NULL leaves the node name to the class devnode. */
+	return NULL;
+}
+
+static const struct device_type mxdma_cdev_type = {
+	.devnode = mxdma_type_devnode,
+};
+
 static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 {
 	struct mx_char_dev *mx_cdev = &mx_pdev->mx_cdev[type];
@@ -483,6 +509,7 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 	kref_get(&mx_pdev->ref);
 	device_initialize(&mx_cdev->dev);
 	mx_cdev->dev.class = mxdma_class;
+	mx_cdev->dev.type = &mxdma_cdev_type;
 	mx_cdev->dev.devt = mx_cdev->cdev_no;
 	mx_cdev->dev.release = mx_cdev_release;
 	/* The ioctl node is the device's control node: hang the liveness/ sysfs
@@ -1119,14 +1146,12 @@ static struct pci_driver pci_driver = {
 };
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 6) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 3)
 static char *mxdma_devnode(struct device *dev, umode_t *mode)
 #else
 static char *mxdma_devnode(const struct device *dev, umode_t *mode)
 #endif
 {
-	if (mode)
-		*mode = 0666;
 	return kasprintf(GFP_KERNEL, "%s/%s", MXDMA_NODE_NAME, dev_name(dev));
 }
 
@@ -1200,6 +1225,12 @@ static void mxdma_enumerate_bound_devices(void)
 
 static int mxdma_init(void)
 {
+	/* devtmpfs takes mode 0 as unset and makes the node 0600, so sysfs would misreport it. */
+	if (dev_mode == 0 || dev_mode > 0777 || !gid_valid(KGIDT_INIT(dev_gid))) {
+		pr_err("Invalid device node access: dev_mode=%#o dev_gid=%u\n", dev_mode, dev_gid);
+		return -EINVAL;
+	}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 3) && RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
 	mxdma_class = class_create(THIS_MODULE, MXDMA_NODE_NAME);
 #else

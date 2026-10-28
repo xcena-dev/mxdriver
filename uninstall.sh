@@ -30,6 +30,7 @@ rm -f /etc/modules-load.d/mx_dma.conf
 
 # Remove load-ordering and initramfs inclusion files
 rm -f /etc/modprobe.d/mx_dma-order.conf
+# mx_dma-access.conf stays: it is the admin's access choice, which the next install keeps.
 rm -f /etc/dracut.conf.d/mx_dma.conf
 if [[ -f /etc/initramfs-tools/modules ]]; then
     sed -i '/^mx_dma$/d' /etc/initramfs-tools/modules

@@ -101,6 +101,34 @@ else
 fi
 export XCENA_TARGET_HAS_CXL
 
+# XCENA_DEVICE_ACCESS=open|group sets the device-node access the module applies at load;
+# unset keeps the access conf an earlier run wrote, so a re-install never lifts that restriction.
+# XCENA_DEVICE_GROUP names the group for 'group' (default xcena).
+case "${XCENA_DEVICE_ACCESS:-}" in
+    ""|open|group) ;;
+    *) echo "[ERROR] XCENA_DEVICE_ACCESS must be 'open' or 'group', got '${XCENA_DEVICE_ACCESS}'"; exit 1 ;;
+esac
+DEVICE_GROUP="${XCENA_DEVICE_GROUP:-xcena}"
+ACCESS_CONF=/etc/modprobe.d/mx_dma-access.conf
+if [[ "${XCENA_DEVICE_ACCESS:-}" == group ]]; then
+    getent group "$DEVICE_GROUP" >/dev/null 2>&1 || groupadd --system "$DEVICE_GROUP"
+    ACCESS_GID=$(getent group "$DEVICE_GROUP" | cut -d: -f3) || true
+    # gid 0 would hand the devices to the root group, and users joining the access group would join root.
+    if [[ ! "$ACCESS_GID" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] Group '${DEVICE_GROUP}' must resolve to a non-root gid, got '${ACCESS_GID}'"; exit 1
+    fi
+fi
+
+# Before the DKMS install: its post-install hook rebuilds the initramfs, which may load mx_dma.
+case "${XCENA_DEVICE_ACCESS:-}" in
+    group)
+        echo "options mx_dma dev_gid=${ACCESS_GID} dev_mode=0660" > "$ACCESS_CONF"
+        ;;
+    open)
+        rm -f "$ACCESS_CONF"
+        ;;
+esac
+
 install_dkms() {
     echo "[INFO] Installing ${PACKAGE_NAME} ${PACKAGE_VERSION} via DKMS..."
 
@@ -152,6 +180,9 @@ install_legacy() {
     make $MAKEVAR BUILDSYSTEM_DIR="$KDIR" -j"$(nproc)" install
 
     depmod -a "${KVER}"
+    # The initramfs may load mx_dma, so rebuild it as the DKMS install does,
+    # which also carries the access conf and this module into it.
+    ./scripts/dkms-post-install.sh "${KVER}"
 }
 
 # Install module (prefer DKMS, fallback to legacy)
@@ -180,24 +211,41 @@ if [[ -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules \
     echo "[INFO] Removed obsolete xcena_set_devdax_perm helper."
 fi
 
+# Earlier builds created this group, and users were told to join it or pass its GID to containers;
+# keep creating it so those setups still work on a new host.
+getent group xcena >/dev/null 2>&1 || groupadd --system xcena
+
 # Remove the device-group udev rule that earlier builds installed.
-# Nodes it restricted keep that group and mode until the module reloads,
-# so reopen the ones present now to the driver's default.
+# Nodes it restricted keep that group and mode until the module reloads.
+# Only an open install reopens them now.
 if [[ -f /etc/udev/rules.d/60-xcena-mx_dma.rules ]]; then
     rm -f /etc/udev/rules.d/60-xcena-mx_dma.rules
     udevadm control --reload-rules \
         || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
-    for node in /dev/mx_dma/mx_dma*; do
-        [[ -c "$node" ]] || continue
-        chown root:root "$node" && chmod 0666 "$node" \
-            || echo "[WARN] Could not reopen ${node}; it reopens when the module reloads."
-    done
-    echo "[INFO] Removed the device-group udev rule; device nodes are open to all users."
+    if [[ -f "$ACCESS_CONF" ]]; then
+        echo "[INFO] Removed the device-group udev rule; device nodes keep their current access until mx_dma reloads."
+    else
+        for node in /dev/mx_dma/mx_dma*; do
+            [[ -c "$node" ]] || continue
+            chown root:root "$node" && chmod 0666 "$node" \
+                || echo "[WARN] Could not reopen ${node}; it reopens when the module reloads."
+        done
+        echo "[INFO] Removed the device-group udev rule; device nodes are open to all users."
+    fi
 fi
 
-# Earlier builds created this group, and users were told to join it or pass its GID to containers;
-# keep creating it so those setups still work on a new host.
-getent group xcena >/dev/null 2>&1 || groupadd --system xcena
+if [[ -f "$ACCESS_CONF" ]]; then
+    # modprobe applies every options line in order, so the last value is the one the module gets.
+    access_gid=$(sed -n 's/.*dev_gid=\([0-9]\+\).*/\1/p' "$ACCESS_CONF" | tail -n 1)
+    access_mode=$(sed -n 's/.*dev_mode=\([0-9]\+\).*/\1/p' "$ACCESS_CONF" | tail -n 1)
+    access_group=$(getent group "$access_gid" | cut -d: -f1) || true
+    echo "[INFO] Device access: restricted to gid ${access_gid}${access_group:+ (group '${access_group}')}, mode ${access_mode}."
+else
+    echo "[INFO] Device access: open to all users (0666)."
+fi
+if [[ -n "${XCENA_DEVICE_ACCESS:-}" ]]; then
+    echo "[INFO] The access change applies when mx_dma next loads: reboot to apply it."
+fi
 
 # CXL-only setup. WO_CXL=1 builds use pci_register_driver and do not depend on
 # the PCI bus_notifier ordering, so none of the softdep / initramfs bits
@@ -220,8 +268,10 @@ EOF
             || echo mx_dma >> /etc/initramfs-tools/modules
         INITRAMFS_BACKEND="initramfs-tools"
     elif command -v dracut >/dev/null 2>&1 && [[ -d /etc/dracut.conf.d ]]; then
+        # Only a hostonly image carries /etc/modprobe.d, so name the access conf for the rest.
         cat > /etc/dracut.conf.d/mx_dma.conf <<'EOF'
 force_drivers+=" mx_dma "
+install_optional_items+=" /etc/modprobe.d/mx_dma-access.conf "
 EOF
         INITRAMFS_BACKEND="dracut"
     else
