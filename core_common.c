@@ -269,13 +269,16 @@ overrun:
 /*
  * When hardware is temporarily unresponsive, the handler spins with
  * cond_resched() for BACKOFF_SPIN_ITERS iterations to stay responsive,
- * then transitions to exponential sleep (125 -> 250 -> 500 -> ... -> 16000 us)
+ * then transitions to exponential sleep (8 -> 16 -> 32 -> ... -> 16000 us)
  * to reduce CPU usage while preventing soft lockup.
+ * A completion is noticed only when a sleep ends, and SCHED_FIFO handlers get
+ * no timer slack: starting small keeps each sleep under a quarter of the wait so far.
  */
 #define BACKOFF_SPIN_ITERS	100
-#define BACKOFF_BASE_SLEEP_US	125
+#define BACKOFF_BASE_SLEEP_US	8
 #define BACKOFF_MAX_SLEEP_US	16000
 #define BACKOFF_TICKS_PER_LEVEL	4
+#define BACKOFF_MAX_SHIFT	(ilog2(BACKOFF_MAX_SLEEP_US / BACKOFF_BASE_SLEEP_US) + 1)
 
 static inline void poll_backoff(unsigned int *idle_count)
 {
@@ -284,16 +287,16 @@ static inline void poll_backoff(unsigned int *idle_count)
 
 	*idle_count = count;
 
+	BUILD_BUG_ON((BACKOFF_BASE_SLEEP_US << BACKOFF_MAX_SHIFT) < BACKOFF_MAX_SLEEP_US);
 	if (count <= BACKOFF_SPIN_ITERS) {
 		cond_resched();
 		return;
 	}
 
-	shift = min_t(unsigned int, (count - BACKOFF_SPIN_ITERS - 1) / BACKOFF_TICKS_PER_LEVEL, 7);
+	shift = min_t(unsigned int, (count - BACKOFF_SPIN_ITERS - 1) / BACKOFF_TICKS_PER_LEVEL,
+		      BACKOFF_MAX_SHIFT);
 	sleep_us = min_t(unsigned int, BACKOFF_BASE_SLEEP_US << shift, BACKOFF_MAX_SLEEP_US);
-	usleep_range_state(sleep_us,
-			   sleep_us + max_t(unsigned int, 100, sleep_us >> 3),
-			   TASK_INTERRUPTIBLE);
+	usleep_range_state(sleep_us, sleep_us + (sleep_us >> 3), TASK_INTERRUPTIBLE);
 }
 
 /******************************************************************************/
@@ -383,6 +386,33 @@ static unsigned long mx_liveness_stalled_ms(struct mx_queue *q)
 	return time_after(now, progress) ? jiffies_to_msecs(now - progress) : 0;
 }
 
+static int mx_queue_live_count(struct mx_queue *q)
+{
+	return atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
+}
+
+/*
+ * Only the liveness watchdog needs a periodic SQ pass, while IO or a probe is in
+ * flight; otherwise wait for the next submission, so an idle device costs no wakeups.
+ */
+static long mx_sq_idle_timeout(struct mx_queue *q, bool lv_on)
+{
+	if (lv_on && (mx_queue_live_count(q) > 0 || atomic_read(&q->lv_inflight)))
+		return msecs_to_jiffies(POLLING_INTERVAL_MSEC);
+	return MAX_SCHEDULE_TIMEOUT;
+}
+
+/*
+ * The CQ never sleeps unbounded: a transfer can turn zombie after this sample,
+ * and its completion must still be reaped (the unbind drain waits for it).
+ */
+static long mx_cq_idle_timeout(struct mx_queue *q)
+{
+	if (mx_queue_live_count(q) > 0 || atomic_read(&q->lv_inflight))
+		return msecs_to_jiffies(POLLING_INTERVAL_MSEC);
+	return msecs_to_jiffies(ZOMBIE_POLL_INTERVAL_MSEC);
+}
+
 /*
  * Transport liveness watchdog. Runs in the submit thread (never blocks): probes
  * a queue stalled with IO outstanding using a fire-and-forget ping, and marks
@@ -445,76 +475,130 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 	}
 }
 
+/*
+ * Pushes queued transfers in order while the SQ has room and no probe holds
+ * submits. Both callers, the submit thread and mx_queue_submit(), hold sq_lock
+ * and ring the doorbell before dropping it, so tail writes never reorder.
+ */
+static unsigned int mx_sq_push_locked(struct mx_queue *q, bool lv_on, bool *went_live)
+{
+	const struct mx_queue_ops *ops = q->ops;
+	struct mx_transfer *transfer, *tmp;
+	unsigned int pushed_count = 0;
+	bool no_completion;
+	void *command;
+
+	lockdep_assert_held(&q->sq_lock);
+	*went_live = false;
+	list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
+		/* Ping outstanding: hold submits until a pong or completion — the probe has priority. */
+		if (lv_on && atomic_read(&q->lv_inflight))
+			break;
+		if (!ops->is_pushable(q))
+			break;
+
+		no_completion = transfer->no_completion;
+		command = transfer->command;
+		list_del_init(&transfer->entry);
+		trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
+		/* Zombies stay in wait_count until drained, so restart the stall
+		 * clock when no live command was outstanding before this one. */
+		if (!no_completion &&
+		    atomic_inc_return(&q->wait_count) -
+		    atomic_read(&q->zombie_wait_count) <= 1) {
+			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
+			*went_live = true;
+		}
+		/*
+		 * Once the command is visible to the device its completion can
+		 * free the transfer, so nothing may touch it after the push.
+		 */
+		ops->push_command(q, command);
+		pushed_count++;
+
+		if (no_completion) {
+			/*
+			 * HW guarantees no completion entry for passthru
+			 * commands with no_completion set.  Signal the
+			 * submitter that the command has been pushed so
+			 * it can free the transfer immediately.
+			 */
+			complete(&transfer->done);
+		} else {
+			swake_up_one(&q->cq_wait);
+		}
+	}
+	return pushed_count;
+}
+
+/*
+ * A handoff to the submit thread costs a cross-CPU wakeup per transfer, and a
+ * C-state exit when that CPU idles, so the caller pushes. The submit thread keeps
+ * the backlog, and is woken after the doorbell when IO goes live so the liveness
+ * watchdog pass re-arms off the critical path.
+ */
+void mx_queue_submit(struct mx_queue *q, struct mx_transfer **transfers, int count)
+{
+	unsigned int pushed_count;
+	unsigned long flags;
+	bool lv_on, went_live, backlog;
+	int i;
+
+	spin_lock_irqsave(&q->sq_lock, flags);
+	for (i = 0; i < count; i++)
+		list_add_tail(&transfers[i]->entry, &q->sq_list);
+	/* liveness_enable_store() publishes the toggle under sq_lock. */
+	lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
+	pushed_count = mx_sq_push_locked(q, lv_on, &went_live);
+	if (pushed_count && q->ops->post_submit)
+		q->ops->post_submit(q);
+	if (pushed_count)
+		trace_mx_dma_xfer_post_submit(q->mx_pdev->dev_id, pushed_count);
+	backlog = !list_empty(&q->sq_list);
+	spin_unlock_irqrestore(&q->sq_lock, flags);
+
+	if (backlog || (lv_on && went_live))
+		swake_up_one(&q->sq_wait);
+}
+
 int mx_submit_handler(void *arg)
 {
 	struct mx_queue *q = (struct mx_queue *)arg;
 	const struct mx_queue_ops *ops = q->ops;
-	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 	unsigned int idle_count = 0;
 	unsigned int pushed_count;
-	bool lv_on;
-	bool no_completion;
-	void *command;
+	bool lv_on, rearm, went_live;
+	long timeout;
 
 	while (!kthread_should_stop()) {
+		/* The timeout is fixed for the whole wait, so a liveness toggle, or IO a
+		 * submitter made live under an unbounded wait, ends it to re-arm the
+		 * watchdog pass. */
+		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
+		timeout = mx_sq_idle_timeout(q, lv_on);
+		rearm = lv_on && timeout == MAX_SCHEDULE_TIMEOUT;
 		__swait_event_interruptible_timeout(q->sq_wait,
-				!list_empty(&q->sq_list),
-				POLLING_INTERVAL_MSEC);
+				!list_empty(&q->sq_list) ||
+				READ_ONCE(q->mx_pdev->liveness_enable) != lv_on ||
+				(rearm && mx_queue_live_count(q) > 0) || kthread_should_stop(),
+				timeout);
 
-		pushed_count = 0;
 		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		spin_lock_irqsave(&q->sq_lock, flags);
-		list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
-			/* Ping outstanding: hold submits until a pong or completion — the probe has priority. */
-			if (lv_on && atomic_read(&q->lv_inflight))
-				break;
-			if (!ops->is_pushable(q))
-				break;
-
-			no_completion = transfer->no_completion;
-			command = transfer->command;
-			list_del_init(&transfer->entry);
-			no_completion = transfer->no_completion;
-			command = transfer->command;
-			list_del_init(&transfer->entry);
-			trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
-			/* Zombies stay in wait_count until drained, so restart the stall
-			 * clock when no live command was outstanding before this one. */
-			if (!no_completion &&
-			    atomic_inc_return(&q->wait_count) -
-			    atomic_read(&q->zombie_wait_count) <= 1)
-				WRITE_ONCE(q->lv_progress_jiffies, jiffies);
-			/*
-			 * Once the command is visible to the device its completion can
-			 * free the transfer, so nothing may touch it after the push.
-			 */
-			ops->push_command(q, command);
-			pushed_count++;
-
-			if (no_completion) {
-				/*
-				 * HW guarantees no completion entry for passthru
-				 * commands with no_completion set.  Signal the
-				 * submitter that the command has been pushed so
-				 * it can free the transfer immediately.
-				 */
-				complete(&transfer->done);
-			} else {
-				swake_up_one(&q->cq_wait);
-			}
-		}
+		pushed_count = mx_sq_push_locked(q, lv_on, &went_live);
 		if (lv_on)
 			mx_liveness_watchdog(q);
-		spin_unlock_irqrestore(&q->sq_lock, flags);
-
 		if (ops->post_submit)
 			ops->post_submit(q);
 		if (pushed_count)
 			trace_mx_dma_xfer_post_submit(q->mx_pdev->dev_id,
 						      pushed_count);
+		spin_unlock_irqrestore(&q->sq_lock, flags);
 
-		if (pushed_count)
+		/* Back off only on a stalled SQ (work held or no room). An empty SQ is
+		 * idle: back off there and the next submission waits out the sleep. */
+		if (pushed_count || list_empty(&q->sq_list))
 			idle_count = 0;
 		else
 			poll_backoff(&idle_count);
@@ -533,13 +617,11 @@ int mx_complete_handler(void *arg)
 	unsigned int idle_count = 0;
 
 	while (!kthread_should_stop()) {
-		bool zombie_only = (atomic_read(&q->wait_count) > 0 &&
-				    atomic_read(&q->zombie_wait_count) == atomic_read(&q->wait_count));
 		bool popped_any = false;
 
 		__swait_event_interruptible_timeout(q->cq_wait,
-			atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count) > 0,
-			zombie_only ? ZOMBIE_POLL_INTERVAL_MSEC : POLLING_INTERVAL_MSEC);
+			mx_queue_live_count(q) > 0 || kthread_should_stop(),
+			mx_cq_idle_timeout(q));
 
 		while (ops->is_popable(q)) {
 			popped_any = true;
@@ -590,7 +672,8 @@ int mx_complete_handler(void *arg)
 		if (ops->post_complete)
 			ops->post_complete(q);
 
-		if (popped_any)
+		/* Back off only while live IO is outstanding but not completing. */
+		if (popped_any || mx_queue_live_count(q) <= 0)
 			idle_count = 0;
 		else
 			poll_backoff(&idle_count);

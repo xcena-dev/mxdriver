@@ -20,6 +20,48 @@ module_param(dev_mode, uint, 0444);
  * registry entries and refcounted allocations, never foreign devres. */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
+
+/* CPU wake-up latency limit (us) held while a device is registered, read as in
+ * /dev/cpu_dma_latency: 0 keeps idle CPUs polling, PM_QOS_CPU_LATENCY_DEFAULT_VALUE
+ * holds none. A limit keeps every CPU out of C6, so it is opt-in (8 holds C1E). */
+static unsigned int cpu_latency_qos_us = PM_QOS_CPU_LATENCY_DEFAULT_VALUE;
+
+static void mx_apply_cpu_latency_qos_locked(struct mx_pci_dev *mx_pdev)
+{
+	lockdep_assert_held(&mx_device_list_lock);
+	if (cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req))
+		cpu_latency_qos_update_request(&mx_pdev->cpu_latency_req, cpu_latency_qos_us);
+}
+
+/* Takes mx_device_list_lock so a device joining the registry cannot miss the new value. */
+static int cpu_latency_qos_us_set(const char *val, const struct kernel_param *kp)
+{
+	struct mx_pci_dev *mx_pdev;
+	unsigned int us;
+	int ret;
+
+	ret = kstrtouint(val, 0, &us);
+	if (ret)
+		return ret;
+	if (us > PM_QOS_CPU_LATENCY_DEFAULT_VALUE)
+		return -EINVAL;
+
+	mutex_lock(&mx_device_list_lock);
+	cpu_latency_qos_us = us;
+	list_for_each_entry(mx_pdev, &mx_device_list_head, registry_entry)
+		mx_apply_cpu_latency_qos_locked(mx_pdev);
+	mutex_unlock(&mx_device_list_lock);
+	return 0;
+}
+
+static const struct kernel_param_ops cpu_latency_qos_us_ops = {
+	.set = cpu_latency_qos_us_set,
+	.get = param_get_uint,
+};
+module_param_cb(cpu_latency_qos_us, &cpu_latency_qos_us_ops, &cpu_latency_qos_us, 0644);
+MODULE_PARM_DESC(cpu_latency_qos_us,
+		 "CPU wake-up latency limit in us held while a device is attached, as in /dev/cpu_dma_latency: 0 keeps CPUs polling, 2000000000 (default) holds none");
+
 static bool mxdma_accepting_devices;
 #ifndef CONFIG_WO_CXL
 static bool mxdma_module_coming;
@@ -359,6 +401,7 @@ static ssize_t liveness_enable_store(struct device *dev,
 			atomic_set(&q->lv_health, MX_LIVENESS_UNKNOWN);
 		}
 		spin_unlock_irqrestore(&q->sq_lock, flags);
+		swake_up_one(&q->sq_wait);
 	} else {
 		WRITE_ONCE(mx_pdev->liveness_enable, val);
 	}
@@ -894,7 +937,7 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	pr_info("PCI device revision %d detected\n", pdev->revision);
 
 	cpu_latency_qos_add_request(&mx_pdev->cpu_latency_req,
-				    MX_CPU_LATENCY_QOS_US);
+				    PM_QOS_CPU_LATENCY_DEFAULT_VALUE);
 	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MX_CDEV,
 				  MXDMA_NODE_NAME);
 	if (ret)
@@ -1081,6 +1124,7 @@ static int mxdma_attach_device(struct pci_dev *pdev)
 		}
 		mutex_lock(&mx_device_list_lock);
 		list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
+		mx_apply_cpu_latency_qos_locked(mx_pdev);
 		mutex_unlock(&mx_device_list_lock);
 		dev_crit(&pdev->dev,
 			 "MXDMA attach failed after ambiguous hardware programming; device pinned unavailable until reset/reboot\n");
@@ -1094,6 +1138,7 @@ static int mxdma_attach_device(struct pci_dev *pdev)
 
 	mutex_lock(&mx_device_list_lock);
 	list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
+	mx_apply_cpu_latency_qos_locked(mx_pdev);
 	mutex_unlock(&mx_device_list_lock);
 	pr_info("pci device is attached (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
 		pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
@@ -1118,6 +1163,7 @@ static void mxdma_detach_device(struct pci_dev *pdev)
 		 * pinned and must remain discoverable for a later real teardown. */
 		mutex_lock(&mx_device_list_lock);
 		list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
+		mx_apply_cpu_latency_qos_locked(mx_pdev);
 		mutex_unlock(&mx_device_list_lock);
 		return;
 	}

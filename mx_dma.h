@@ -87,15 +87,6 @@
  */
 #define MX_CMD_INLINE_SIZE	64
 
-/*
- * Wake-up latency budget held via cpu_latency_qos for the lifetime of each
- * mx device.  Blocks deep C-states whose exit latency would stretch the
- * freq ramp-up window we observed adding ~12 us to cold DMA submissions.
- * Small enough to still allow shallow idle for power; large enough not to
- * force a polling-idle CPU.
- */
-#define MX_CPU_LATENCY_QOS_US	8
-
 enum {
 	MX_CDEV_IOCTL = 0,
 	MX_CDEV_EVENT,
@@ -486,10 +477,8 @@ struct mx_pci_dev {
 	spinlock_t zombie_lock;
 	struct task_struct *zombie_cleanup_thread;
 
-	/*
-	 * Held across the device's lifetime to block deep C-states.  Shallow
-	 * idle is still allowed so we don't force a polling-idle CPU.
-	 */
+	/* Registered with no constraint; holds the cpu_latency_qos_us module
+	 * parameter while the device is in the registry (init.c). */
 	struct pm_qos_request cpu_latency_req;
 };
 
@@ -573,6 +562,7 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
 void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const struct mx_queue_ops *ops);
 int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q);
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
+void mx_queue_submit(struct mx_queue *q, struct mx_transfer **transfers, int count);
 
 /* Ctrl writes carry their payload inline in the command's doorbell slot. */
 static inline int mx_fill_ctrl_doorbell(struct mx_transfer *transfer, uint64_t *doorbell)
@@ -597,10 +587,9 @@ int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
 
 /*
- * Wake both submit and complete handlers so they start running in parallel
- * with userspace transfer setup (page pinning, DMA mapping, command build).
- * Safe to call from any I/O entry point; cheap no-op if handlers are already
- * running.
+ * Wake the complete handler so its CPU leaves idle in parallel with userspace
+ * transfer setup (page pinning, DMA mapping, command build). The submitter
+ * pushes the command itself (mx_queue_submit()), so the submit thread is not woken.
  */
 static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
 {
@@ -608,7 +597,6 @@ static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
 
 	if (!q)
 		return;
-	swake_up_one(&q->sq_wait);
 	swake_up_one(&q->cq_wait);
 }
 

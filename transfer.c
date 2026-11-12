@@ -46,18 +46,13 @@ static void mx_sg_context_release(struct mx_sg_context *ctx)
 {
 	struct device *dev = &ctx->mx_pdev->pdev->dev;
 	struct sg_table *sgt = &ctx->sgt;
-	int i;
 
 	if (sgt->nents)
 		dma_unmap_sg(dev, sgt->sgl, sgt->orig_nents, ctx->dir);
 
-	if (ctx->dir != DMA_TO_DEVICE) {
-		for (i = 0; i < ctx->pages_nr; i++)
-			set_page_dirty_lock(ctx->pages[i]);
-	}
-
 	if (ctx->pages_nr > 0)
-		unpin_user_pages(ctx->pages, ctx->pages_nr);
+		unpin_user_pages_dirty_lock(ctx->pages, ctx->pages_nr,
+					    ctx->dir != DMA_TO_DEVICE);
 
 	if (sgt->sgl && sgt->sgl != ctx->sg_inline)
 		sg_free_table(sgt);
@@ -413,29 +408,17 @@ fail:
 
 static void mx_transfer_queue(struct mx_queue *queue, struct mx_transfer *transfer)
 {
-	unsigned long flags;
-
 	init_completion(&transfer->done);
-
-	spin_lock_irqsave(&queue->sq_lock, flags);
-	list_add_tail(&transfer->entry, &queue->sq_list);
-	spin_unlock_irqrestore(&queue->sq_lock, flags);
-	swake_up_one(&queue->sq_wait);
+	mx_queue_submit(queue, &transfer, 1);
 }
 
 static void mx_transfer_queue_parallel(struct mx_queue *queue, struct mx_transfer **transfers, int count)
 {
-	unsigned long flags;
 	int i;
 
 	for (i = 0; i < count; i++)
 		init_completion(&transfers[i]->done);
-
-	spin_lock_irqsave(&queue->sq_lock, flags);
-	for (i = 0; i < count; i++)
-		list_add_tail(&transfers[i]->entry, &queue->sq_list);
-	spin_unlock_irqrestore(&queue->sq_lock, flags);
-	swake_up_one(&queue->sq_wait);
+	mx_queue_submit(queue, transfers, count);
 }
 
 static bool mx_transfer_remove_from_sq(struct mx_queue *queue, struct mx_transfer *transfer)
@@ -1074,6 +1057,7 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list)
 {
 	struct mx_transfer *transfer, *tmp;
+	bool drained = !list_empty(list);
 
 	list_for_each_entry_safe(transfer, tmp, list, zombie_entry) {
 		bool claimed = (atomic_cmpxchg(&transfer->wait_claimed, 0, 1) == 0);
@@ -1093,6 +1077,14 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 		 * Last split on an sg_context triggers dma_unmap_sg + unpin_user_pages on its put(). */
 		release_mx_transfer(transfer);
 	}
+
+	/*
+	 * Until here a CQ-reaped zombie hides one live command from mx_queue_live_count(),
+	 * and no submission reports it coming back: wake the submit thread, whose wait on
+	 * that count may be unbounded, so the liveness watchdog re-arms.
+	 */
+	if (drained)
+		swake_up_one(&mx_pdev->io_queue->sq_wait);
 }
 
 int zombie_cleanup_handler(void *data)

@@ -56,7 +56,7 @@ static bool is_pushable(struct mx_queue_v1 *queue)
 	struct mx_mbox *mbox = &queue->sq_mbox;
 
 	/*
-	 * Single-producer contract: mx_submit_handler is the only advancer of mbox->ctx.tail and holds sq_lock here,
+	 * Producer contract: every advancer of mbox->ctx.tail holds sq_lock here,
 	 * which the assert below enforces under lockdep builds.  Under that contract the cached free_space is a
 	 * conservative lower bound on the true value (head only grows as HW consumes), so when the cache still has
 	 * headroom for another full command we skip the MMIO readq entirely — v1 profile shows is_pushable() readq at
