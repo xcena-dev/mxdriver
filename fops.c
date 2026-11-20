@@ -6,9 +6,6 @@
 #include <linux/compat.h>
 #endif
 
-/******************************************************************************/
-/* Functions for file_operations                                              */
-/******************************************************************************/
 static int mxdma_device_open(struct inode *inode, struct file *file)
 {
 	struct mx_char_dev *mx_cdev;
@@ -19,8 +16,6 @@ static int mxdma_device_open(struct inode *inode, struct file *file)
 		pr_warn("magic is mismatch. mxcdev(0x%p) inode(%#lx)\n", mx_cdev, inode->i_ino);
 		return -EINVAL;
 	}
-	/* cdev_device_del() does not stop chrdev_open() on an inode that already
-	 * carries i_cdev, so refuse new files once the device is going away. */
 	if (percpu_ref_is_dying(&mx_cdev->mx_pdev->io_ref) || !mx_pdev_get_live(mx_cdev->mx_pdev))
 		return -ENODEV;
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
@@ -77,10 +72,6 @@ static int mxdma_device_prepare(struct file *file, struct mx_file_ctx **ctx,
 		return -EINVAL;
 	}
 
-	/* Every fops body runs between this get and mxdma_device_finish(); teardown
-	 * kills io_ref and waits for zero before touching what the body uses. The
-	 * lease's removed flag is set first, so a body that raced the kill still
-	 * sees the device as gone. */
 	if (!percpu_ref_tryget_live(&(*mx_pdev)->io_ref))
 		return -ENODEV;
 	if (READ_ONCE((*mx_pdev)->lease.removed) || !(*mx_pdev)->enabled) {
@@ -169,9 +160,6 @@ static __poll_t mxdma_device_poll(struct file *file, poll_table *wait)
 	mx_event = &mx_pdev->event;
 	poll_wait(file, &mx_event->wq, wait);
 
-	/* The kill and its wake-up may both predate our poll_wait() registration,
-	 * so re-check after registering: a poller must never sleep for good on a
-	 * device that is going away. */
 	if (percpu_ref_is_dying(&mx_pdev->io_ref) || READ_ONCE(mx_pdev->lease.removed))
 		mask = EPOLLERR | EPOLLHUP;
 	else if (atomic_read(&mx_event->count) > 0) {

@@ -73,8 +73,6 @@ search_re 'try_module_get\(THIS_MODULE\)' init.c
 search_re 'mxdma_enumerate_bound_devices' init.c
 search_re 'device_lock\(&pdev->dev\)' init.c
 search_re 'strcmp\(pdev->dev.driver->name, "cxl_pci"\)' init.c
-# Keep main's single-owner detach rule together with the lease branch's
-# ability to retain an ambiguous device for later recovery.
 detach_block=$(sed -n '/^static void mxdma_detach_device(/,/^}/p' init.c)
 unlink_line=$(awk '/list_del_init\(/ { print NR; exit }' <<<"$detach_block")
 unlock_line=$(awk '/mutex_unlock\(/ { print NR; exit }' <<<"$detach_block")
@@ -125,9 +123,6 @@ search_re 'ctx->direct_count' lease.c
 search_re 'mx_lease_direct_begin\(ctx\)' fops.c
 search_re 'mx_lease_direct_end\(ctx\)' fops.c
 search_re 'struct mx_file_ctx \*owner_ctx' mx_dma.h
-# The BAR mapping is shared across revisions (core_common.c). Each mmap() pins
-# its file context and the device through the shared bar_vma, released by the
-# last vm_close(); the lease charge follows the same object.
 bar_mmap_block=$(sed -n '/^int mx_bar_mmap(/,/^}/p' core_common.c)
 grep -q 'mx_file_ctx_get(ctx)' <<<"$bar_mmap_block"
 grep -q 'bar_vma->owner_ctx = ctx' <<<"$bar_mmap_block"
@@ -156,9 +151,6 @@ fi
 search_fixed 'if (!READ_ONCE(mx_pdev->dma_reclaim_safe))' transfer.c
 search_fixed 'atomic_read(&transfer->wait_claimed) == 1' transfer.c
 search_fixed 'TRACE_EVENT(mx_dma_xfer_post_submit' trace.h
-# Both SQ tail advancers ring the doorbell under sq_lock, so tail writes cannot
-# reorder, and emit the hardware-visible proof trace after the doorbell but before
-# the unlock, so the two producers' batches cannot interleave in the trace.
 doorbell_sites=$(count_re 'ops->post_submit\(q\)' < core_common.c || true)
 if [ "${doorbell_sites:-0}" -ne 2 ]; then
     echo "every post-submit doorbell must be one of the checked SQ advancers" >&2
@@ -202,7 +194,6 @@ if ! grep -q 'admin_desynced' <<<"$completion_timeout_block" ||
     echo "a doorbelled admin command without completion must fail closed" >&2
     exit 1
 fi
-# v2 FW fills the NVMe status word with the phase and the echoed opcode.
 if search_re 'cmpl(\.|->)status' core_v2.c; then
     echo "a v2 completion carries no status; its opcode echo is not a failure" >&2
     exit 1
@@ -214,8 +205,6 @@ if [ "$publisher_check" -ne 1 ]; then
     echo "every publisher acquisition must require host CAP_SYS_RAWIO" >&2
     exit 1
 fi
-# The kernel calls the class devnode after the type devnode with the same mode pointer,
-# so a mode set there would override dev_mode.
 type_devnode_block=$(sed -n '/^static char \*mxdma_type_devnode(/,/^}/p' init.c)
 class_devnode_block=$(sed -n '/^static char \*mxdma_devnode(/,/^}/p' init.c)
 [[ -n $type_devnode_block && -n $class_devnode_block ]]
@@ -226,24 +215,19 @@ if ! grep -Fq '*mode = dev_mode;' <<<"$type_devnode_block" ||
     echo "only the type devnode may set the node mode and gid" >&2
     exit 1
 fi
-# devtmpfs deletes a node with NULL mode, uid and gid pointers, so each store needs its guard.
 if ! grep -Fq 'if (mode)' <<<"$type_devnode_block" || ! grep -Fq 'if (gid)' <<<"$type_devnode_block"; then
     echo "the type devnode must check mode and gid for NULL" >&2
     exit 1
 fi
 search_fixed 'if (dev_mode == 0 || dev_mode > 0777 || !gid_valid(KGIDT_INIT(dev_gid))) {' init.c
-# An idle handler may wait with MAX_SCHEDULE_TIMEOUT, so every wait must also end on kthread_stop().
 swait_calls=$(count_re '__swait_event_interruptible_timeout\(' < core_common.c)
 stop_conds=$(count_re '\|\| kthread_should_stop\(\),' < core_common.c)
 if [ "$swait_calls" -lt 2 ] || [ "$swait_calls" -ne "$stop_conds" ]; then
     echo "every io handler wait must also wake for kthread_stop()" >&2
     exit 1
 fi
-# Backoff is for a stalled queue; an idle one must wait for the next submission instead.
 search_fixed 'if (pushed_count || list_empty(&q->sq_list))' core_common.c
 search_fixed 'if (popped_any || mx_queue_live_count(q) <= 0)' core_common.c
-# A transfer can turn zombie after the CQ samples its timeout; the unbind drain
-# waits for zombie completions, so the CQ must never sleep unbounded.
 cq_timeout_block=$(sed -n '/^static long mx_cq_idle_timeout(/,/^}/p' core_common.c)
 [[ -n $cq_timeout_block ]]
 if grep -Fq 'MAX_SCHEDULE_TIMEOUT' <<<"$cq_timeout_block"; then
@@ -251,9 +235,6 @@ if grep -Fq 'MAX_SCHEDULE_TIMEOUT' <<<"$cq_timeout_block"; then
     exit 1
 fi
 search_fixed 'mx_cq_idle_timeout(q));' core_common.c
-# The CPU latency QoS is opt-in: probe registers no constraint, every registry
-# insertion applies the module parameter under the registry lock, and a write
-# re-applies it to every registered device under the same lock.
 search_fixed 'static unsigned int cpu_latency_qos_us = PM_QOS_CPU_LATENCY_DEFAULT_VALUE;' init.c
 if scan_c_or_h_sources 'MX_CPU_LATENCY_QOS_US'; then
     echo "the CPU latency QoS must not have a built-in always-on value" >&2
@@ -279,36 +260,28 @@ grep -Fq 'mx_apply_cpu_latency_qos_locked(mx_pdev);' <<<"$qos_set_block"
 apply_block=$(sed -n '/^static void mx_apply_cpu_latency_qos_locked(/,/^}/p' init.c)
 grep -Fq 'lockdep_assert_held(&mx_device_list_lock);' <<<"$apply_block"
 grep -Fq 'cpu_latency_qos_request_active(&mx_pdev->cpu_latency_req)' <<<"$apply_block"
-# The parameter reads as /dev/cpu_dma_latency: applied as written (0 polls) and
-# bounded by PM_QOS_CPU_LATENCY_DEFAULT_VALUE, which is no constraint.
 grep -Fq 'cpu_latency_qos_update_request(&mx_pdev->cpu_latency_req, cpu_latency_qos_us);' <<<"$apply_block"
 if grep -Fq 'cpu_latency_qos_us ?' <<<"$apply_block"; then
     echo "cpu_latency_qos_us must not remap 0 away from the cpu_dma_latency meaning" >&2
     exit 1
 fi
 grep -Fq 'if (us > PM_QOS_CPU_LATENCY_DEFAULT_VALUE)' <<<"$qos_set_block"
-# swait timeouts take jiffies, so the millisecond poll intervals are converted.
 if grep -n '_INTERVAL_MSEC' core_common.c | grep -v 'msecs_to_jiffies(' | grep -q .; then
     echo "poll intervals in ms must be converted with msecs_to_jiffies()" >&2
     exit 1
 fi
-# A completion is seen only when a backoff sleep ends, so the first sleep stays short.
 backoff_base=$(sed -n 's/^#define BACKOFF_BASE_SLEEP_US[[:space:]]*\([0-9][0-9]*\).*/\1/p' core_common.c)
 if [ -z "$backoff_base" ] || [ "$backoff_base" -gt 16 ]; then
     echo "the first poll backoff sleep must stay short" >&2
     exit 1
 fi
 search_fixed 'BUILD_BUG_ON((BACKOFF_BASE_SLEEP_US << BACKOFF_MAX_SHIFT) < BACKOFF_MAX_SLEEP_US);' core_common.c
-# DMA-written pages are dirtied by the unpin itself, not page by page under the lock.
 if search_fixed 'set_page_dirty_lock' transfer.c; then
     echo "DMA-written pages must be dirtied by unpin_user_pages_dirty_lock()" >&2
     exit 1
 fi
 unpin_call=$(grep -A1 'unpin_user_pages_dirty_lock(ctx->pages, ctx->pages_nr,' transfer.c)
 grep -Fq 'ctx->dir != DMA_TO_DEVICE);' <<<"$unpin_call"
-# Submitters push from mx_queue_submit() under sq_lock; only it adds to the SQ list.
-# A push that makes IO live with liveness on wakes the submit thread, after the
-# doorbell, so the periodic watchdog pass re-arms.
 sq_list_add_re='list_add(_tail)?\([^;]*sq_list\)'
 if scan_c_or_h_sources "$sq_list_add_re" | grep -Ev '^(\./)?core_common\.c:' | grep -q .; then
     echo "only mx_queue_submit() may add to the SQ list" >&2
@@ -330,16 +303,11 @@ grep -A1 -F 'if (backlog || (lv_on && went_live))' <<<"$queue_submit_block" | \
     grep -Fq 'swake_up_one(&q->sq_wait);'
 sq_timeout_block=$(sed -n '/^static long mx_sq_idle_timeout(/,/^}/p' core_common.c)
 grep -Fq 'if (lv_on && (' <<<"$sq_timeout_block"
-# The SQ wait timeout is fixed for the whole wait, so a liveness toggle (which
-# wakes it) or IO made live under an unbounded wait must end the wait.
 submit_handler_block=$(sed -n '/^int mx_submit_handler(/,/^}/p' core_common.c)
 grep -Fq 'READ_ONCE(q->mx_pdev->liveness_enable) != lv_on ||' <<<"$submit_handler_block"
 grep -Fq 'rearm = lv_on && timeout == MAX_SCHEDULE_TIMEOUT;' <<<"$submit_handler_block"
 grep -Fq '(rearm && mx_queue_live_count(q) > 0) || kthread_should_stop(),' <<<"$submit_handler_block"
 grep -Fq 'timeout = mx_sq_idle_timeout(q, lv_on);' <<<"$submit_handler_block"
-# Draining a zombie the CQ already reaped raises mx_queue_live_count() with no
-# submission to announce it, so the one place that lowers zombie_wait_count
-# wakes the submit thread afterwards, or its unbounded wait never re-arms.
 zombie_lower_re='atomic_(dec|sub)[a-z_]*\([^;]*zombie_wait_count'
 zombie_lower_sites=$(scan_c_or_h_sources "$zombie_lower_re" || true)
 drain_block=$(sed -n '/^static void drain_zombie_list(/,/^}/p' transfer.c)

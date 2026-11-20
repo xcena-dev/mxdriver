@@ -327,7 +327,6 @@ static void test_legacy_exclusion(void)
 	struct mx_lease_sm_holder legacy = {};
 	struct mx_lease_sm_holder hub = {};
 
-	/* Mere open is deliberately inert. The first direct operation registers legacy. */
 	assert(!unopened.legacy && mx_lease_sm_idle(&sm));
 	assert(mx_lease_sm_authorize_direct(&sm, &legacy) == 0);
 	assert(legacy.legacy && sm.legacy_holders == 1);
@@ -394,7 +393,6 @@ static void test_direct_admission_blocks_activation(void)
 
 	mx_lease_sm_release_direct(&active_direct);
 	assert(active_direct == 0);
-	/* Models a nowait/zombie command after its syscall admission ended. */
 	assert(mx_lease_sm_transition(&sm, &publisher,
 				      MX_LEASE_TRANSITION_ACTIVATE_WORKLOAD,
 				      active_direct, 1, 0, true) == -EBUSY);

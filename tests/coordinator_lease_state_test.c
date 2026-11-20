@@ -31,8 +31,6 @@ static void prepare(struct mx_lease_sm *state)
 		MX_LEASE_TRANSITION_ACTIVATE_COORDINATOR, 1, 0, 0, true) == -EBUSY);
 	assert(mx_lease_sm_transition(state, &initializer,
 		MX_LEASE_TRANSITION_ACTIVATE_COORDINATOR, 0, 1, 0, true) == -EBUSY);
-	/* A live BAR mapping can ring a doorbell with no direct call in flight:
-	 * it must gate quiescence exactly like one. */
 	assert(mx_lease_sm_transition(state, &initializer,
 		MX_LEASE_TRANSITION_ACTIVATE_COORDINATOR, 0, 0, 1, true) == -EBUSY);
 	assert(mx_lease_sm_transition(state, &initializer,
@@ -67,7 +65,7 @@ static void concurrent_controllers_and_workload(void)
 		MX_LEASE_PROFILE_COORDINATOR_CONTROL) == 0);
 	assert(mx_lease_sm_acquire(&state, &b,
 		MX_LEASE_PROFILE_COORDINATOR_CONTROL) == 0);
-	assert(state.publishers == 0); /* no fixed/sole publisher */
+	assert(state.publishers == 0);
 	assert(state.workloads == 2 && state.family_holders == 2);
 	assert(mx_lease_sm_acquire(&state, &workload,
 		MX_LEASE_PROFILE_COORDINATOR_WORKLOAD) == 0);
@@ -99,7 +97,7 @@ static void incomplete_setup_and_proof_separation(void)
 		MX_LEASE_FAMILY_COORDINATOR, true, 0, 0, 1, false, false) == -EBUSY);
 	assert(mx_lease_sm_validate_slot_domain_anchor(&initializer,
 		MX_LEASE_FAMILY_COORDINATOR, true, 0, 0, 0, false, false) == 0);
-	mx_lease_sm_release(&state, &initializer); /* crash before setup completion */
+	mx_lease_sm_release(&state, &initializer);
 	assert(!state.coordinator_ready);
 	assert(mx_lease_sm_acquire(&state, &control,
 		MX_LEASE_PROFILE_COORDINATOR_CONTROL) == -ENXIO);
@@ -116,7 +114,6 @@ static void incomplete_setup_and_proof_separation(void)
 		true, false, false) == -EACCES);
 	assert(mx_lease_sm_validate_proofs(MX_LEASE_PROFILE_COORDINATOR_WORKLOAD,
 		true, false, false) == -EACCES);
-	/* Existing bootstrap behavior is unchanged outside the new profiles. */
 	assert(mx_lease_sm_validate_proofs(MX_LEASE_PROFILE_HUB_WORKLOAD,
 		false, false, false) == 0);
 }
@@ -129,9 +126,9 @@ int main(void)
 		int expected = mx_lease_profile_family(profile) == MX_LEASE_FAMILY_COORDINATOR ? -EPERM : 0;
 		assert(mx_lease_sm_authorize_memory_cmd(profile, 3) == expected);
 		assert(mx_lease_sm_authorize_memory_cmd(profile, 6) == expected);
-		assert(mx_lease_sm_authorize_memory_cmd(profile, 2) == 0); /* range Unpin */
-		assert(mx_lease_sm_authorize_memory_cmd(profile, 5) == 0); /* range Unload */
-		assert(mx_lease_sm_authorize_memory_cmd(profile, 7) == 0); /* range Unmap */
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 2) == 0);
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 5) == 0);
+		assert(mx_lease_sm_authorize_memory_cmd(profile, 7) == 0);
 	}
 	assert(mx_lease_sm_authorize_memory_cmd(MX_LEASE_PROFILE_MAX + 1, 3) == -EINVAL);
 	concurrent_controllers_and_workload();

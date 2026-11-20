@@ -24,7 +24,6 @@ struct mx_queue_v2 {
 	dma_addr_t cq_dma_addr;
 
 	uint32_t depth;
-	/* True while the device can no longer write these rings; only then may they be freed. */
 	uint16_t last_sq_tail;
 	uint16_t last_cq_head;
 	uint16_t sq_tail;
@@ -66,11 +65,6 @@ struct mx_command {
 	uint64_t rsvd4;
 } __packed;
 
-/*
- * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
- * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
- * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
- */
 static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
 	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
 
@@ -83,9 +77,6 @@ struct mx_completion
 	uint16_t status;
 } __packed;
 
-/******************************************************************************/
-/* Queue helpers                                                              */
-/******************************************************************************/
 static bool is_pushable(struct mx_queue_v2 *queue)
 {
        return (queue->sq_tail + 1) % queue->depth != READ_ONCE(queue->sq_head);
@@ -96,8 +87,6 @@ static bool is_popable(struct mx_queue_v2 *queue)
 	struct mx_completion *cqe;
 	uint16_t status, phase;
 
-	/* A pong does not count in wait_count; keep polling while a probe is
-	 * in flight, or a pong landing after the last completion is never popped. */
 	if (atomic_read(&queue->common.wait_count) <= 0 &&
 	    !atomic_read(&queue->common.lv_inflight))
 		return false;
@@ -165,9 +154,6 @@ static void ring_cq_doorbell(struct mx_queue_v2 *queue)
 	queue->last_cq_head = queue->cq_head;
 }
 
-/******************************************************************************/
-/* Queue ops adapter for unified handlers                                     */
-/******************************************************************************/
 static bool v2_is_pushable(struct mx_queue *q)
 {
 	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
@@ -233,14 +219,9 @@ static const struct mx_queue_ops v2_queue_ops = {
 	.build_ping_command = build_ping_command_v2,
 };
 
-/******************************************************************************/
-/* Transfer                                                                   */
-/******************************************************************************/
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-/* transfer.c slices parallel transfers on host-page boundaries; they must land on chunk
- * boundaries. */
 static_assert((PAGE_SIZE % SINGLE_DMA_SIZE) == 0,
 	      "v2 PRP chunking requires SINGLE_DMA_SIZE to divide PAGE_SIZE");
 
@@ -285,8 +266,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 		return ERR_PTR(-EINVAL);
 	}
 
-	/* Branch on the DMA-side entry count, not host page count (alignments can differ).
-	 * This also validates that the slice is expressible as a PRP list. */
 	ret = mx_get_total_desc_count(sg, intra_off, transfer->size, SINGLE_DMA_SIZE, &desc_cnt);
 	if (ret || desc_cnt == 0) {
 		pr_warn("Failed to count descs (err=%d, cnt=%zu, id=%u)\n", ret, desc_cnt, transfer->id);
@@ -298,7 +277,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	} else if (desc_cnt == 2) {
 		size_t first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
 
-		/* Second PRP entry points to the chunk after the first. */
 		if (intra_off + first_len < sg_dma_len(sg)) {
 			comm->prp_entry2 = comm->prp_entry1 + first_len;
 		} else {
@@ -345,9 +323,6 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 	return (void*)comm;
 }
 
-/******************************************************************************/
-/* Init                                                                       */
-/******************************************************************************/
 static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q_depth)
 {
 	queue->depth = q_depth;
@@ -429,8 +404,6 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 
 	aqa = queue->depth - 1;
 	aqa |= aqa << 16;
-	/* From this write onward the device knows host DMA addresses. Any
-	 * ambiguous admin completion must retain this backing until reboot/reset. */
 	mx_pdev->queue_dma_programmed = true;
 	writel(aqa, mx_pdev->bar + 0x0);
 	writeq(queue->sq_dma_addr, mx_pdev->bar + 0x8);
@@ -444,9 +417,6 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-/* A matching completion is always a success:
- * v2 FW asserts on a bad admin command,
- * and the word NVMe uses for status holds the phase and the echoed opcode. */
 static void record_admin_terminal(struct mx_queue_v2 *admin_queue,
 				  u8 opcode, u64 result)
 {
@@ -497,9 +467,6 @@ static bool submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c,
 	}
 	if (count >= timeout) {
 		pr_err("Timeout waiting for pushable admin queue\n");
-		/* This command has not been copied to the SQ or doorbelled, so
-		 * there is no ambiguous hardware operation to drain.  The caller
-		 * may retry or unwind using the last terminal queue state. */
 		return false;
 	}
 
@@ -594,8 +561,6 @@ static int drain_pending_admin(struct mx_pci_dev *mx_pdev)
 
 static void disable_admin_queue(struct mx_pci_dev *mx_pdev)
 {
-	/* No admin command is pending when called. Clear device-visible host
-	 * addresses before coherent backing can be freed or Bus Master re-enabled. */
 	writel(0, mx_pdev->bar + 0x0);
 	writeq(0, mx_pdev->bar + 0x8);
 	writeq(0, mx_pdev->bar + 0x10);
@@ -621,9 +586,6 @@ static int recover_mx_queue(struct mx_pci_dev *mx_pdev)
 		return 0;
 	}
 
-	/* A late CREATE may have succeeded. Tear down whatever terminal state was
-	 * recorded, always SQ before its referenced CQ. A fresh timeout is retained
-	 * in admin_pending and the caller retries this recovery without freeing. */
 	if (io_queue->hw_sq_created &&
 	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {
 		WRITE_ONCE(mx_pdev->protocol_poisoned, true);
@@ -682,9 +644,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.io_queue_info.cq_id = cq_id;
 	if (!submit_sync_command(admin_queue, &comm, &result)) {
 		pr_err("Failed to create IO submission queue\n");
-		/* A timeout desynchronizes the admin queue, and then no command is safe.
-		 * A command that never reached the SQ leaves the queue usable,
-		 * so delete the already-created CQ below. */
 		if (READ_ONCE(admin_queue->admin_desynced))
 			return -EIO;
 		ret = -EIO;
@@ -698,9 +657,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 		goto out_delete;
 	}
 
-	/* cq_id is device-supplied; its doorbell lives at bar + NVME_REG_DBS +
-	 * cq_id * sizeof(u64). Reject an id whose doorbell would fall outside the
-	 * mapped BAR before configure_queue() turns it into an MMIO pointer. */
 	if (NVME_REG_DBS + ((size_t)cq_id + 1) * sizeof(uint64_t) >
 	    mx_pdev->bar_mapped_size) {
 		pr_err("IO queue id %u doorbell exceeds mapped BAR (%llu bytes)\n",
@@ -724,8 +680,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 
 out_delete:
-	/* SQ references CQ, so unwind in dependency order. Ambiguous commands are
-	 * retained and drained by recover_mx_queue() during the real unbind. */
 	if (io_queue->hw_sq_created &&
 	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {
 		pr_err("Failed to unwind IO submission queue\n");
@@ -749,8 +703,6 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	if (!admin_queue || !io_queue)
 		return 0;
 
-	/* No live waiter remains once the per-device workqueue is drained. Stop
-	 * software queue access first, then tear down SQ before its referenced CQ. */
 	mx_stop_queue_threads(mx_pdev);
 	if (io_queue->hw_sq_created &&
 	    !delete_io_sq(admin_queue, io_queue->hw_sq_id)) {

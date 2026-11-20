@@ -23,8 +23,6 @@ struct mx_lease_sm {
 	u32 workloads;
 	u32 legacy_holders;
 	bool quiescent;
-	/* Persists in the anchored device state when live holders reach zero.
-	 * It proves local setup completed, not cross-host/device quiescence. */
 	bool coordinator_ready;
 };
 
@@ -78,18 +76,13 @@ static inline int mx_lease_sm_authorize_memory_cmd(u32 profile, u32 subopcode)
 {
 	if (profile > MX_LEASE_PROFILE_MAX)
 		return -EINVAL;
-	/* Gaia passthrough ABI: 3=UnpinAll, 6=UnloadAll. Range operations,
-	 * including Unmap (7), preserve another tenant's memory state. */
+	/* INTENTIONAL: FW subopcodes 3/6 are device-wide UnpinAll/UnloadAll. */
 	if ((subopcode == 3 || subopcode == 6) &&
 	    mx_lease_profile_family(profile) == MX_LEASE_FAMILY_COORDINATOR)
 		return -EPERM;
 	return 0;
 }
 
-/* A persistent state anchor remembers the topology even while its live-holder
- * counters are zero. Only the matching publisher may restart an idle family;
- * workloads attach after that publisher has re-established Quiescent.
- */
 static inline int mx_lease_sm_validate_anchored_acquire(
 		const struct mx_lease_sm *sm, u32 state_family, u32 profile)
 {
@@ -173,8 +166,6 @@ static inline int mx_lease_sm_acquire(struct mx_lease_sm *sm,
 	return 0;
 }
 
-/* A live BAR mapping can ring a doorbell without any direct call in flight,
- * so for every quiescence decision it counts like an active direct call. */
 static inline int mx_lease_sm_transition(struct mx_lease_sm *sm,
 					 struct mx_lease_sm_holder *holder,
 					 u32 operation, u32 active_direct,
@@ -349,8 +340,6 @@ static inline int mx_lease_sm_validate_slot_domain_anchor(
 	return 0;
 }
 
-/* Coordinated roles require proof BEFORE their first direct operation.
- * Legacy sandbox profiles retain their pre-bind bootstrap behavior. */
 static inline int mx_lease_sm_validate_proofs(u32 profile, bool ever_bound,
 		bool slot_bound, bool lifetime_bound)
 {
@@ -365,4 +354,4 @@ static inline int mx_lease_sm_validate_proofs(u32 profile, bool ever_bound,
 	return 0;
 }
 
-#endif /* _MX_DMA_LEASE_SM_H */
+#endif

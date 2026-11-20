@@ -17,8 +17,6 @@
 #define trace_mx_dma_data_write_exit(dev_id, qid, op, ret)		do { } while (0)
 #endif
 
-/* Traced wrappers around the four ctrl/data primitives. They are inlined and,
- * when tracing is compiled out, collapse to a direct call. */
 static __always_inline ssize_t traced_read_ctrl(struct mx_file_ctx *ctx, uint32_t qid,
 		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
@@ -67,14 +65,6 @@ static __always_inline ssize_t traced_write_data(struct mx_file_ctx *ctx, uint32
 	return ret;
 }
 
-/* Note: MX_IOCTL_READ_DATA / MX_IOCTL_WRITE_DATA are intentionally NOT
- * wrapped with traced_* primitives. These ioctls operate on raw user_addr /
- * device_addr (no mailbox / qid context), and dispatch via the *_parallel
- * helpers which internally spawn multiple sub-transfers. The outer
- * ioctl_enter/exit slice captured in ioctl_to_device() covers the full
- * operation; per-sub-transfer slices would dramatically inflate ring
- * buffer volume without adding a meaningful per-op breakdown. */
-
 struct mx_ioctl_mbox_info
 {
 	uint32_t qid;
@@ -111,11 +101,11 @@ struct mx_ioctl_data
 struct mx_ioctl_passthru_cmd
 {
 	uint64_t device_addr;
-	uint64_t host_addr; /* output */
+	uint64_t host_addr;
 	uint64_t size;
 	uint16_t subopcode;
 	uint8_t  no_completion;
-	uint8_t  status;    /* output */
+	uint8_t  status;
 };
 
 struct mx_ioctl_protocol_cmd
@@ -136,9 +126,6 @@ struct mx_ioctl_protocol_cmd
 #define MX_IOCTL_HIO_SEND		_IOW(MX_IOCTL_MAGIC, 9, struct mx_ioctl_protocol_cmd)
 #define MX_IOCTL_HIO_RECV		_IOW(MX_IOCTL_MAGIC, 10, struct mx_ioctl_protocol_cmd)
 
-/* MX_IOCTL_* indices must match mx_dma_ioctl_nr_names in trace.h AND both switches in
- * ioctl_to_device (setup-only early-return + main dispatch).  Boundary asserts catch
- * reorderings, removals, and additions that shift the last NR. */
 static_assert(_IOC_NR(MX_IOCTL_REGISTER_MBOX) == 1,  "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 static_assert(_IOC_NR(MX_IOCTL_HIO_RECV)      == 10, "MX_IOCTL_* changed — update trace.h + ioctl_to_device");
 
@@ -187,8 +174,6 @@ static uint32_t get_popable_count(struct mx_mbox *mbox)
 		return mbox->depth - head.index;
 }
 
-/* Returns ERR_PTR on failure so the caller can propagate the real errno
- * (invalid context vs. failed read vs. OOM). */
 static struct mx_mbox *create_mx_mbox(struct mx_file_ctx *file_ctx,
 		uint64_t ctx_addr, uint64_t data_addr)
 {
@@ -243,8 +228,6 @@ static struct mx_mbox *get_cq_mbox(struct mx_pci_dev *mx_pdev, uint32_t qid)
 	return (qid < MAX_NUM_OF_MBOX) ? mx_pdev->cq_mbox_list[qid] : NULL;
 }
 
-/* The ctx address fixes the mailbox's hardware context (data_addr is derived from
- * it), so matching SQ+CQ ctx addresses identify the same registered mailbox. */
 static bool registered_mbox_matches(struct mx_pci_dev *mx_pdev, uint32_t qid,
 				    const struct mx_ioctl_mbox_info *info)
 {
@@ -264,20 +247,14 @@ static long ioctl_register_mbox(struct mx_file_ctx *file_ctx, unsigned long arg)
 	if (mbox_info.qid >= MAX_NUM_OF_MBOX)
 		return -EINVAL;
 
-	/* The qid owned by the driver's internal HIO channel is never host-registerable;
-	 * its submit/complete threads drive that hardware context unconditionally. */
 	if (mx_pdev->reserved_hio_qid >= 0 && mbox_info.qid == (uint32_t)mx_pdev->reserved_hio_qid)
 		return -EBUSY;
 
 	mutex_lock(&mx_pdev->bar_map->lock);
-	/* BAR MMIO and kernel mailboxes cannot coexist. */
 	if (mx_pdev->bar_map->count) {
 		mutex_unlock(&mx_pdev->bar_map->lock);
 		return -EBUSY;
 	}
-	/* Idempotent only for the same context: a populated slot with matching SQ+CQ ctx
-	 * addresses is a no-op success; a mismatch repoints a qid that has no unregister
-	 * path, so reject it. An SQ slot implies its CQ (populated together). */
 	if (mx_pdev->sq_mbox_list[mbox_info.qid]) {
 		bool matches = registered_mbox_matches(mx_pdev, mbox_info.qid, &mbox_info);
 
@@ -296,7 +273,6 @@ static long ioctl_register_mbox(struct mx_file_ctx *file_ctx, unsigned long arg)
 		return PTR_ERR(cq_mbox);
 	}
 
-	/* Recheck ownership before publishing mailboxes built outside the lock. */
 	mutex_lock(&mx_pdev->bar_map->lock);
 	if (mx_pdev->bar_map->count) {
 		mutex_unlock(&mx_pdev->bar_map->lock);
@@ -348,8 +324,6 @@ static long ioctl_init_mbox(struct mx_file_ctx *file_ctx, unsigned long arg)
 	if (!sq_mbox || !cq_mbox)
 		return -EINVAL;
 
-	/* Each reset is an idempotent device-context refresh, so a failed INIT_MBOX
-	 * is always safe to retry even if the SQ was already refreshed. */
 	ret = reset_mx_mbox(file_ctx, sq_mbox);
 	if (ret)
 		return ret;
@@ -383,7 +357,6 @@ static long ioctl_send_cmd_with_data(struct mx_file_ctx *file_ctx, unsigned long
 		ssize_t wret = traced_write_data(file_ctx, send_cmd.qid, send_cmd.user_addr,
 				send_cmd.size, &send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
 
-		/* Don't advance the mailbox for a command whose payload never landed. */
 		if (wret < 0)
 			return wret;
 	}
@@ -409,8 +382,6 @@ static long ioctl_send_cmd_with_data(struct mx_file_ctx *file_ctx, unsigned long
 		return cret < 0 ? cret : -EIO;
 	}
 
-	/* Advance and publish the tail only after the command word has landed;
-	 * otherwise the device would consume a stale slot on a failed write. */
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
 	traced_write_ctrl(file_ctx, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
@@ -440,11 +411,6 @@ static long ioctl_send_cmds(struct mx_file_ctx *file_ctx, unsigned long arg)
 
 	mutex_lock(&sq_mbox->lock);
 
-	/*
-	 * Cached head only lags the real device head (device advances head
-	 * monotonically), so cached_pushable <= real_pushable. Skip the PCIe
-	 * read when the cache already covers the request; fall through otherwise.
-	 */
 	count = get_pushable_count(sq_mbox);
 	if (count < send_cmd.nr_cmds) {
 		mbox_context_t ctx;
@@ -473,7 +439,6 @@ static long ioctl_send_cmds(struct mx_file_ctx *file_ctx, unsigned long arg)
 		return wret < 0 ? wret : -EIO;
 	}
 
-	/* Advance and publish the tail only after the batch has landed. */
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, count, sq_mbox->depth);
 	traced_write_ctrl(file_ctx, send_cmd.qid, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t),
 			(loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
@@ -631,7 +596,6 @@ long ioctl_to_device(struct mx_file_ctx *file_ctx, unsigned int cmd,
 	struct mx_pci_dev *mx_pdev __maybe_unused = file_ctx->mx_pdev;
 	long ret;
 
-	/* Setup-only ioctls bypass tracing — they fire once per mailbox lifetime. */
 	switch (cmd) {
 	case MX_IOCTL_REGISTER_MBOX:
 		return ioctl_register_mbox(file_ctx, arg);

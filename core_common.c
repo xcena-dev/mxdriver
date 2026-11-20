@@ -11,9 +11,6 @@
 #define trace_mx_dma_xfer_complete_orphan(xfer_id, status, result)		do { } while (0)
 #endif
 
-/******************************************************************************/
-/* Descriptor list utilities                                                  */
-/******************************************************************************/
 int mx_get_list_count(size_t total_desc_cnt, int descs_per_list)
 {
 	int list_cnt = 1;
@@ -26,9 +23,6 @@ int mx_get_list_count(size_t total_desc_cnt, int descs_per_list)
 	return list_cnt;
 }
 
-/* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the offset into the
- * found entry.  Returns 0 on hit, -EINVAL if byte_offset >= sum(sg_dma_len).  byte_offset must
- * be strictly less than the total mapped length — callers handle zero-length slices upstream. */
 int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 		 struct scatterlist **out_sg, size_t *out_intra)
 {
@@ -52,8 +46,6 @@ int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 	return -EINVAL;
 }
 
-/* Chunk length from dma_addr to the next dma_size boundary; dma_size must be a power of 2
- * (mask instead of modulo: a 64-bit div would not link on 32-bit kernels). */
 static size_t prp_chunk_len_at(dma_addr_t dma_addr, size_t dma_size)
 {
 	size_t rem = (size_t)(dma_addr & (dma_size - 1));
@@ -61,9 +53,6 @@ static size_t prp_chunk_len_at(dma_addr_t dma_addr, size_t dma_size)
 	return rem ? (dma_size - rem) : dma_size;
 }
 
-/* First PRP chunk length at (sg, intra_off): distance to the next dma_size boundary of the
- * mapped DMA address (the device splits by the address it receives; SWIOTLB may not preserve
- * the CPU page offset), clamped to the entry's remaining bytes. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size)
 {
 	size_t len = prp_chunk_len_at(sg_dma_address(sg) + intra_off, dma_size);
@@ -71,16 +60,6 @@ size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t d
 	return min_t(size_t, len, sg_dma_len(sg) - intra_off);
 }
 
-/* Count PRP descriptors for byte_size bytes at (sg, intra_off) and verify the slice is
- * expressible as a PRP list; caller must pre-locate via mx_sg_locate.  sg/intra_off are by-value
- * so the caller's walking state survives.
- *
- * The device receives no per-descriptor lengths: it takes the first chunk as the distance to the
- * next dma_size boundary and every later one as a full dma_size.  Only the first descriptor may
- * therefore start mid-chunk and only the last may be short, which holds exactly when every entry
- * but the last ends on a dma_size boundary and every entry but the first starts on one.
- * dma_set_min_align_mask() keeps mappings compliant; a violation means the device would misplace
- * data, so reject it (-EINVAL) instead. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
 			    size_t dma_size, size_t *out_cnt)
 {
@@ -116,8 +95,6 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 		sg = sg_next(sg);
 		intra_off = 0;
 
-		/* Checked separately from the end above: only a trailing entry may be short, so
-		 * its start alignment is not implied by any entry's end. */
 		if (sg && (sg_dma_address(sg) & (dma_size - 1))) {
 			pr_warn_ratelimited("sg entry starts off a %zu-byte chunk boundary (dma=%pad)\n",
 					    dma_size, &sg->dma_address);
@@ -134,9 +111,6 @@ int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byt
 	return 0;
 }
 
-/* desc_cnt: descriptors this call will emit, i.e. mx_get_total_desc_count() less the one the
- * caller stashes inline when skip_first_entry.  Required: the caller has already walked the
- * slice, and recomputing here would only add a way for the two walks to disagree. */
 int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 		      struct mx_transfer *transfer, size_t dma_size,
 		      int descs_per_list, bool skip_first_entry,
@@ -185,7 +159,6 @@ int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 	len = min3(len, entry_avail, remaining);
 
 	if (skip_first_entry) {
-		/* First slot lives in command.prp_entry{1,2}; advance past it. */
 		dma_addr += len;
 		entry_avail -= len;
 		remaining -= len;
@@ -213,8 +186,6 @@ int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			desc_idx = 0;
 		}
 
-		/* total_desc_cnt is the allocation basis; emitting past it would leave the loop
-		 * writing off the end of the current dma_pool page. */
 		if (desc_idx >= descs_per_list || total_desc_cnt == 0)
 			goto overrun;
 
@@ -237,10 +208,6 @@ int mx_desc_list_init(struct mx_pci_dev *mx_pdev,
 			dma_addr = sg_dma_address(sg);
 			entry_avail = sg_dma_len(sg);
 		}
-		/* Past the first chunk the device consumes a full dma_size per descriptor, so emit
-		 * that and rely on mx_get_total_desc_count() having rejected any layout where it
-		 * would not fit.  Re-checked rather than re-derived: a short chunk here would be
-		 * read long by the device. */
 		if (dma_addr & (dma_size - 1))
 			goto misaligned;
 		len = min3(dma_size, entry_avail, remaining);
@@ -262,18 +229,6 @@ overrun:
 	return -EINVAL;
 }
 
-/******************************************************************************/
-/* Adaptive backoff for poll loops                                            */
-/******************************************************************************/
-
-/*
- * When hardware is temporarily unresponsive, the handler spins with
- * cond_resched() for BACKOFF_SPIN_ITERS iterations to stay responsive,
- * then transitions to exponential sleep (8 -> 16 -> 32 -> ... -> 16000 us)
- * to reduce CPU usage while preventing soft lockup.
- * A completion is noticed only when a sleep ends, and SCHED_FIFO handlers get
- * no timer slack: starting small keeps each sleep under a quarter of the wait so far.
- */
 #define BACKOFF_SPIN_ITERS	100
 #define BACKOFF_BASE_SLEEP_US	8
 #define BACKOFF_MAX_SLEEP_US	16000
@@ -299,9 +254,6 @@ static inline void poll_backoff(unsigned int *idle_count)
 	usleep_range_state(sleep_us, sleep_us + (sleep_us >> 3), TASK_INTERRUPTIBLE);
 }
 
-/******************************************************************************/
-/* Thread helpers                                                             */
-/******************************************************************************/
 void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const struct mx_queue_ops *ops)
 {
 	q->dev = &mx_pdev->pdev->dev;
@@ -317,7 +269,6 @@ void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const 
 	q->lv_progress_jiffies = jiffies;
 }
 
-/* Starts the submit/complete handlers on q and publishes it as the io queue. */
 int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q)
 {
 	int ret;
@@ -329,9 +280,6 @@ int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q)
 		mx_pdev->submit_thread = NULL;
 		return ret;
 	}
-	/* SCHED_FIFO (lowest RT band) keeps the handlers ahead of CFS noise,
-	 * so a submission does not pay CFS wake latency on a busy box.
-	 * They sleep when idle and back off on a stalled device, never spinning. */
 	sched_set_fifo_low(mx_pdev->submit_thread);
 
 	mx_pdev->complete_thread = kthread_run(mx_complete_handler, q, "mx_complete_thd%d", mx_pdev->dev_id);
@@ -370,14 +318,6 @@ void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev)
 	mx_pdev->complete_thread = NULL;
 }
 
-/******************************************************************************/
-/* Unified submit/complete handlers                                           */
-/******************************************************************************/
-/*
- * Time since the last completion. The complete thread may publish a stamp
- * newer than the jiffies read here; time_after() turns that into 0 instead of
- * an unsigned wrap that would look like a huge stall.
- */
 static unsigned long mx_liveness_stalled_ms(struct mx_queue *q)
 {
 	unsigned long progress = READ_ONCE(q->lv_progress_jiffies);
@@ -391,10 +331,6 @@ static int mx_queue_live_count(struct mx_queue *q)
 	return atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
 }
 
-/*
- * Only the liveness watchdog needs a periodic SQ pass, while IO or a probe is in
- * flight; otherwise wait for the next submission, so an idle device costs no wakeups.
- */
 static long mx_sq_idle_timeout(struct mx_queue *q, bool lv_on)
 {
 	if (lv_on && (mx_queue_live_count(q) > 0 || atomic_read(&q->lv_inflight)))
@@ -402,10 +338,6 @@ static long mx_sq_idle_timeout(struct mx_queue *q, bool lv_on)
 	return MAX_SCHEDULE_TIMEOUT;
 }
 
-/*
- * The CQ never sleeps unbounded: a transfer can turn zombie after this sample,
- * and its completion must still be reaped (the unbind drain waits for it).
- */
 static long mx_cq_idle_timeout(struct mx_queue *q)
 {
 	if (mx_queue_live_count(q) > 0 || atomic_read(&q->lv_inflight))
@@ -413,32 +345,19 @@ static long mx_cq_idle_timeout(struct mx_queue *q)
 	return msecs_to_jiffies(ZOMBIE_POLL_INTERVAL_MSEC);
 }
 
-/*
- * Transport liveness watchdog. Runs in the submit thread (never blocks): probes
- * a queue stalled with IO outstanding using a fire-and-forget ping, and marks
- * the transport DEAD when neither completions nor a pong arrive in time.
- */
 static void mx_liveness_watchdog(struct mx_queue *q)
 {
 	struct mx_pci_dev *mx_pdev = q->mx_pdev;
 	int outstanding = atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count);
-	/* Snapshot + sanitize sysfs-writable params: keep 1 <= stall < dead so a probe
-	 * is always attempted before the no-completion DEAD verdict fires. */
 	unsigned int dead_ms = max(READ_ONCE(mx_pdev->liveness_dead_ms), 2u);
 	unsigned int stall_ms = clamp(READ_ONCE(mx_pdev->liveness_stall_ms), 1u, dead_ms - 1);
 	unsigned long stalled_ms;
 	u64 pong_wait_ns;
 
-	/* Probe outstanding with no pong past the dead budget: dead. Checked before
-	 * the idle return, since the probe may outlive the last command. */
 	pong_wait_ns = ktime_get_ns() - READ_ONCE(q->lv_sent_ns);
 	if (atomic_read(&q->lv_inflight) &&
 	    pong_wait_ns > (u64)dead_ms * NSEC_PER_MSEC) {
-		/* cmpxchg from SUSPECT so a pong that just resolved the window
-		 * (ALIVE) is not clobbered. */
 		atomic_cmpxchg(&q->lv_health, MX_LIVENESS_SUSPECT, MX_LIVENESS_DEAD);
-		/* Re-probe rather than release the hold, so held submits never
-		 * reach a dead device; a full SQ keeps the hold and retries. */
 		if (q->ops->is_pushable(q)) {
 			dev_warn_ratelimited(q->dev,
 				"liveness: no pong for %llu ms (outstanding=%d), re-probing\n",
@@ -455,19 +374,13 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 
 	stalled_ms = mx_liveness_stalled_ms(q);
 
-	/* No completion for too long, no probe in flight: dead (SQ-stuck case where
-	 * a probe cannot even be pushed; an in-flight probe has its own pong budget
-	 * above). Progress re-sampled to narrow race vs lock-free ALIVE write. */
 	if (stalled_ms > dead_ms && atomic_read(&q->lv_inflight) == 0 &&
 	    mx_liveness_stalled_ms(q) > dead_ms)
 		atomic_set(&q->lv_health, MX_LIVENESS_DEAD);
 
-	/* Probe: stalled past threshold, queue has room, no probe in flight. */
 	if (stalled_ms > stall_ms && atomic_read(&q->lv_inflight) == 0 &&
 	    q->ops->is_pushable(q) &&
 	    atomic_cmpxchg(&q->lv_inflight, 0, 1) == 0) {
-		/* Verifying: downgrade ALIVE->SUSPECT until the pong (or any
-		 * completion) resolves it; leaves DEAD untouched. */
 		atomic_cmpxchg(&q->lv_health, MX_LIVENESS_ALIVE, MX_LIVENESS_SUSPECT);
 		WRITE_ONCE(q->lv_sent_ns, ktime_get_ns());
 		q->ops->build_ping_command(q->lv_ping_cmd);
@@ -475,11 +388,6 @@ static void mx_liveness_watchdog(struct mx_queue *q)
 	}
 }
 
-/*
- * Pushes queued transfers in order while the SQ has room and no probe holds
- * submits. Both callers, the submit thread and mx_queue_submit(), hold sq_lock
- * and ring the doorbell before dropping it, so tail writes never reorder.
- */
 static unsigned int mx_sq_push_locked(struct mx_queue *q, bool lv_on, bool *went_live)
 {
 	const struct mx_queue_ops *ops = q->ops;
@@ -491,7 +399,6 @@ static unsigned int mx_sq_push_locked(struct mx_queue *q, bool lv_on, bool *went
 	lockdep_assert_held(&q->sq_lock);
 	*went_live = false;
 	list_for_each_entry_safe(transfer, tmp, &q->sq_list, entry) {
-		/* Ping outstanding: hold submits until a pong or completion — the probe has priority. */
 		if (lv_on && atomic_read(&q->lv_inflight))
 			break;
 		if (!ops->is_pushable(q))
@@ -501,28 +408,17 @@ static unsigned int mx_sq_push_locked(struct mx_queue *q, bool lv_on, bool *went
 		command = transfer->command;
 		list_del_init(&transfer->entry);
 		trace_mx_dma_xfer_submit((u32)transfer->id, no_completion);
-		/* Zombies stay in wait_count until drained, so restart the stall
-		 * clock when no live command was outstanding before this one. */
 		if (!no_completion &&
 		    atomic_inc_return(&q->wait_count) -
 		    atomic_read(&q->zombie_wait_count) <= 1) {
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 			*went_live = true;
 		}
-		/*
-		 * Once the command is visible to the device its completion can
-		 * free the transfer, so nothing may touch it after the push.
-		 */
+		/* INTENTIONAL: a completion may free transfer once pushed; read fields first. */
 		ops->push_command(q, command);
 		pushed_count++;
 
 		if (no_completion) {
-			/*
-			 * HW guarantees no completion entry for passthru
-			 * commands with no_completion set.  Signal the
-			 * submitter that the command has been pushed so
-			 * it can free the transfer immediately.
-			 */
 			complete(&transfer->done);
 		} else {
 			swake_up_one(&q->cq_wait);
@@ -531,12 +427,6 @@ static unsigned int mx_sq_push_locked(struct mx_queue *q, bool lv_on, bool *went
 	return pushed_count;
 }
 
-/*
- * A handoff to the submit thread costs a cross-CPU wakeup per transfer, and a
- * C-state exit when that CPU idles, so the caller pushes. The submit thread keeps
- * the backlog, and is woken after the doorbell when IO goes live so the liveness
- * watchdog pass re-arms off the critical path.
- */
 void mx_queue_submit(struct mx_queue *q, struct mx_transfer **transfers, int count)
 {
 	unsigned int pushed_count;
@@ -547,7 +437,6 @@ void mx_queue_submit(struct mx_queue *q, struct mx_transfer **transfers, int cou
 	spin_lock_irqsave(&q->sq_lock, flags);
 	for (i = 0; i < count; i++)
 		list_add_tail(&transfers[i]->entry, &q->sq_list);
-	/* liveness_enable_store() publishes the toggle under sq_lock. */
 	lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 	pushed_count = mx_sq_push_locked(q, lv_on, &went_live);
 	if (pushed_count && q->ops->post_submit)
@@ -572,9 +461,6 @@ int mx_submit_handler(void *arg)
 	long timeout;
 
 	while (!kthread_should_stop()) {
-		/* The timeout is fixed for the whole wait, so a liveness toggle, or IO a
-		 * submitter made live under an unbounded wait, ends it to re-arm the
-		 * watchdog pass. */
 		lv_on = READ_ONCE(q->mx_pdev->liveness_enable);
 		timeout = mx_sq_idle_timeout(q, lv_on);
 		rearm = lv_on && timeout == MAX_SCHEDULE_TIMEOUT;
@@ -596,8 +482,6 @@ int mx_submit_handler(void *arg)
 						      pushed_count);
 		spin_unlock_irqrestore(&q->sq_lock, flags);
 
-		/* Back off only on a stalled SQ (work held or no room). An empty SQ is
-		 * idle: back off there and the next submission waits out the sleep. */
 		if (pushed_count || list_empty(&q->sq_list))
 			idle_count = 0;
 		else
@@ -627,20 +511,14 @@ int mx_complete_handler(void *arg)
 			popped_any = true;
 			ops->pop_completion(q, &info);
 
-			/* Unconditional by design (not gated on liveness_enable): keeps
-			 * lv_progress/lv_health warm so a sysfs enable at boot won't see a
-			 * stale timestamp and falsely declare DEAD on the first tick. */
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
 			atomic_set(&q->lv_health, MX_LIVENESS_ALIVE);
 			if (info.id == MX_PING_ID) {
-				/* Record RTT only if the pong itself ended the verify window;
-				 * a normal completion may have resolved it first. */
 				if (atomic_xchg(&q->lv_inflight, 0) == 1)
 					WRITE_ONCE(q->lv_rtt_ns,
 						   ktime_get_ns() - READ_ONCE(q->lv_sent_ns));
 				continue;
 			}
-			/* Any normal completion also ends the verify window — resume held submits. */
 			atomic_set(&q->lv_inflight, 0);
 
 			transfer = transfer_id_claim_completion(info.id, &id_flags);
@@ -664,15 +542,12 @@ int mx_complete_handler(void *arg)
 			transfer->result = info.result;
 			transfer->status = info.status;
 			complete(&transfer->done);
-			/* The waiter/cleaner serializes its final free on id_lock.
-			 * Do not touch transfer after releasing completion ownership. */
 			transfer_id_complete_unlock(id_flags);
 		}
 
 		if (ops->post_complete)
 			ops->post_complete(q);
 
-		/* Back off only while live IO is outstanding but not completing. */
 		if (popped_any || mx_queue_live_count(q) <= 0)
 			idle_count = 0;
 		else
@@ -682,9 +557,6 @@ int mx_complete_handler(void *arg)
 	return 0;
 }
 
-/******************************************************************************/
-/* BAR mapping                                                                */
-/******************************************************************************/
 static void mx_bar_map_release(struct kref *kref)
 {
 	struct mx_bar_map *bar_map = container_of(kref, struct mx_bar_map, kref);
@@ -712,8 +584,6 @@ void mx_bar_map_put(struct mx_bar_map *bar_map)
 	kref_put(&bar_map->kref, mx_bar_map_release);
 }
 
-/* Account for VMAs created by fork or a split. They share the bar_vma of the
- * mmap() they descend from, so the lease keeps charging the original mapper. */
 static void mx_bar_vma_open(struct vm_area_struct *vma)
 {
 	struct mx_bar_vma *bar_vma = vma->vm_private_data;
@@ -737,7 +607,6 @@ static void mx_bar_vma_close(struct vm_area_struct *vma)
 	mutex_lock(&bar_map->lock);
 	if (!WARN_ON_ONCE(!bar_map->count)) {
 		bar_map->count--;
-		/* The address_space is valid only while a VMA pins its inode. */
 		if (!bar_map->count)
 			bar_map->mapping = NULL;
 	}
@@ -745,8 +614,6 @@ static void mx_bar_vma_close(struct vm_area_struct *vma)
 	mutex_unlock(&bar_map->lock);
 
 	if (last) {
-		/* The lease counts mmap() objects, not fork copies: the mapper is
-		 * released only when the last copy of this mapping is gone. */
 		mutex_lock(&mx_pdev->lease.lock);
 		if (!WARN_ON_ONCE(!owner_ctx->bar_mapping_count))
 			owner_ctx->bar_mapping_count--;
@@ -756,7 +623,6 @@ static void mx_bar_vma_close(struct vm_area_struct *vma)
 		mx_pdev_put(mx_pdev);
 	}
 
-	/* The final put destroys the mutex. */
 	mx_bar_map_put(bar_map);
 }
 
@@ -765,7 +631,6 @@ static const struct vm_operations_struct mx_bar_vm_ops = {
 	.close	= mx_bar_vma_close,
 };
 
-/* dev_map() derives the BAR base and size from PCI resources. */
 int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
 		struct vm_area_struct *vma)
 {
@@ -782,14 +647,11 @@ int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
 
 	mutex_lock(&bar_map->lock);
 
-	/* Serialize the online check with device teardown. */
 	if (!mx_pdev->enabled) {
 		ret = -ENODEV;
 		goto out_unlock;
 	}
 
-	/* BAR MMIO and ioctl mailboxes cannot own the same regions. Registration
-	 * has no undo path, so any registered mailbox blocks mmap permanently. */
 	for (qid = 0; qid < MAX_NUM_OF_MBOX; qid++) {
 		if (mx_pdev->sq_mbox_list[qid]) {
 			ret = -EBUSY;
@@ -820,10 +682,7 @@ int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
 	vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 #endif
 
-	/* Userspace must leave driver-owned regions in the full-BAR mapping untouched.
-	 * That includes the qid-48 HIO region the driver's own submit/complete
-	 * threads drive: that kernel-owned context stays live, so a BAR mapper is
-	 * trusted not to touch it. */
+	/* INTENTIONAL: full-BAR mappers must leave driver-owned regions (v1 qid 48) alone. */
 	pfn = pci_resource_start(mx_pdev->pdev, MXDMA_BAR_INDEX) >> PAGE_SHIFT;
 
 	mutex_lock(&mx_pdev->lease.lock);
@@ -837,26 +696,18 @@ int mx_bar_mmap(struct mx_pci_dev *mx_pdev, struct mx_file_ctx *ctx,
 	ret = io_remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
 				 vma->vm_page_prot);
 	if (!ret) {
-		/* All BAR mappings through this cdev share one address_space. */
 		bar_map->mapping = vma->vm_file->f_mapping;
-		/* The VMA may outlive the character-device file. Keep its file context
-		 * alive so the lease holder remains visible until the last forked VMA
-		 * closes; otherwise close(fd) would let a sandbox lease coexist with a
-		 * legacy process that can still write the BAR. */
 		mx_file_ctx_get(ctx);
 		bar_vma->owner_ctx = ctx;
 		mutex_lock(&mx_pdev->lease.lock);
 		ctx->bar_mapping_count++;
 		mutex_unlock(&mx_pdev->lease.lock);
-		/* One device reference follows the shared bar_vma across fork and is
-		 * dropped by the last vm_close(); the lease lock it takes lives there. */
 		kref_get(&mx_pdev->ref);
 		bar_vma->mx_pdev = mx_pdev;
 		bar_vma->bar_map = bar_map;
 		refcount_set(&bar_vma->refs, 1);
 		vma->vm_private_data = bar_vma;
 		vma->vm_ops = &mx_bar_vm_ops;
-		/* vm_ops->open is not called for the initial VMA. */
 		kref_get(&bar_map->kref);
 		bar_map->count++;
 		bar_vma = NULL;

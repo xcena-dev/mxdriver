@@ -7,8 +7,6 @@
 
 #include <linux/tracepoint.h>
 
-/* IO_OPCODE_* values from mx_dma.h (anonymous enum). Hardcoded to avoid
- * pulling the full driver header into the multi-include trace context. */
 #define mx_dma_opcode_names		\
 	{ 0,  "R_DATA"   },		\
 	{ 1,  "W_DATA"   },		\
@@ -22,21 +20,18 @@
 	{ 9,  "SEND"     },		\
 	{ 10, "RECV"     }
 
-/* enum dma_data_direction values (kernel <linux/dma-direction.h>). */
 #define mx_dma_dir_names		\
 	{ 0, "BIDIR"       },		\
 	{ 1, "TO_DEVICE"   },		\
 	{ 2, "FROM_DEVICE" },		\
 	{ 3, "NONE"        }
 
-/* Wait-exit terminal state. See enum mx_dma_wait_state in transfer.c. */
 #define mx_dma_wait_state_names		\
 	{ 0, "COMPLETED"      },	\
 	{ 1, "RECOVERED"      },	\
 	{ 2, "LATE_COMPLETED" },	\
 	{ 3, "ZOMBIE"         }
 
-/* _IOC_NR() of MX_IOCTL_* macros from ioctl.c */
 #define mx_dma_ioctl_nr_names		\
 	{ 1,  "REGISTER_MBOX"      },	\
 	{ 2,  "INIT_MBOX"          },	\
@@ -48,8 +43,6 @@
 	{ 8,  "PASSTHRU_CMD"       },	\
 	{ 9,  "HIO_SEND"           },	\
 	{ 10, "HIO_RECV"           }
-
-/* --- ioctl entry / exit --- */
 
 TRACE_EVENT(mx_dma_ioctl_enter,
 	TP_PROTO(int dev_id, unsigned int cmd),
@@ -90,12 +83,6 @@ TRACE_EVENT(mx_dma_ioctl_exit,
 		__print_symbolic(__entry->nr, mx_dma_ioctl_nr_names),
 		__entry->ret)
 );
-
-/* --- ctrl/data transfer enter/exit pairs ---
- *
- * One unified enter class (size, dev_addr, nowait) is used for both read and
- * write; for reads the call site passes nowait=false.
- */
 
 DECLARE_EVENT_CLASS(mx_dma_xfer_enter_class,
 	TP_PROTO(int dev_id, u32 qid, int opcode, size_t size, u64 dev_addr, bool nowait),
@@ -179,13 +166,6 @@ DEFINE_EVENT(mx_dma_xfer_exit_class, mx_dma_data_write_exit,
 	TP_PROTO(int dev_id, u32 qid, int opcode, ssize_t ret),
 	TP_ARGS(dev_id, qid, opcode, ret));
 
-/* --- transfer lifecycle (enqueue / submit / complete / wait_exit) ---
- *
- * xfer_id is the IDR-allocated transfer->id and is globally unique across
- * devices, so submit/complete events omit dev_id — analysis scripts join on
- * xfer_id back to the enqueue event when per-device filtering is needed.
- */
-
 TRACE_EVENT(mx_dma_xfer_enqueue,
 	TP_PROTO(int dev_id, u32 xfer_id, int opcode, int dir, size_t size,
 		 bool is_sg, int parallel_idx, int parallel_count),
@@ -237,10 +217,6 @@ TRACE_EVENT(mx_dma_xfer_submit,
 		__entry->no_completion)
 );
 
-/* Emitted only after the queue's post_submit hook has completed. For v2 this
- * is after the SQ tail doorbell write; v1 publishes each command directly in
- * push_command and has no separate hook. Together with the preceding ordered
- * submit events this marks a batch as hardware-visible. */
 TRACE_EVENT(mx_dma_xfer_post_submit,
 	TP_PROTO(int dev_id, u32 pushed_count),
 	TP_ARGS(dev_id, pushed_count),
@@ -279,10 +255,6 @@ TRACE_EVENT(mx_dma_xfer_complete,
 		__entry->is_zombie)
 );
 
-/* Completion arrived for a transfer that find_transfer_by_id could not match
- * (already freed, late after zombie cleanup, or HW corruption).  Separate
- * event so analysis can distinguish alive vs orphan without an is_zombie
- * sentinel. */
 TRACE_EVENT(mx_dma_xfer_complete_orphan,
 	TP_PROTO(u32 xfer_id, u8 status, u64 result),
 	TP_ARGS(xfer_id, status, result),
@@ -324,7 +296,7 @@ TRACE_EVENT(mx_dma_xfer_wait_exit,
 		__print_symbolic(__entry->state, mx_dma_wait_state_names))
 );
 
-#endif /* _MX_DMA_TRACE_H */
+#endif
 
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .

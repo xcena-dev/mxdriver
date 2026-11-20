@@ -69,8 +69,6 @@ static void mx_pdev_free(struct kref *ref)
 		path_put(&state_path);
 	if (slot_domain_path_valid)
 		path_put(&slot_domain_path);
-	/* Live BAR VMAs hold their own bar_map references and a device
-	 * reference, so this runs only after the last of them closed. */
 	if (mx_pdev->bar_map)
 		mx_bar_map_put(mx_pdev->bar_map);
 	percpu_ref_exit(&mx_pdev->io_ref);
@@ -141,11 +139,6 @@ static void mx_file_ctx_free(struct mx_file_ctx *ctx)
 	ctx->proof_lifetime_tag = 0;
 	ctx->proof_slot = 0;
 	mutex_unlock(&mx_pdev->lease.lock);
-	/* Keep the exact inode, identity, generation, and family pinned even when
-	 * the last holder exits. Otherwise a crash followed by unlink/recreate can
-	 * erase the only durable evidence for an already-dequeued firmware command.
-	 * The anchor is released only when this physical-device incarnation dies.
-	 */
 	if (slot_source)
 		fput(slot_source);
 	if (slot_proof)
@@ -187,10 +180,6 @@ int mx_lease_transfer_get(struct mx_file_ctx *ctx, struct mx_transfer *transfer)
 		ret = -EACCES;
 		goto out;
 	}
-	/* Once a workload has published reclamation proofs, detaching them is a
-	 * sticky runtime gate.  Rebinding is allowed, but no command may slip into
-	 * the normal-close interval without a proof descriptor.
-	 */
 	ret = mx_lease_sm_validate_proofs(ctx->lease.profile,
 			ctx->proofs_ever_bound, !!ctx->slot_proof_file,
 			!!ctx->lifetime_proof_file);
@@ -383,11 +372,6 @@ static long mx_lease_acquire(struct mx_file_ctx *ctx, unsigned long arg)
 	     req.profile == MX_LEASE_PROFILE_COORDINATOR_CONTROL) &&
 	    ctx->mx_cdev != &ctx->mx_pdev->mx_cdev[MX_CDEV_IOCTL])
 		return -EPERM;
-	/* The state inode, identity, generation, and device incarnation are
-	 * deliberately observable so workloads can verify an attachment.  None of
-	 * those values authorize the sole publisher: require host privilege for
-	 * fresh publishers, exact-inode restarts, and replacement candidates.
-	 */
 	if (mx_lease_profile_is_publisher(req.profile) &&
 	    !capable(CAP_SYS_RAWIO))
 		return -EPERM;
@@ -417,11 +401,6 @@ static long mx_lease_acquire(struct mx_file_ctx *ctx, unsigned long arg)
 			ret = -ENXIO;
 			goto out_unlock;
 		}
-		/* A fresh inode discards any history not represented by an existing
-		 * persistent anchor. The publisher privilege check above confines this
-		 * operation to explicit host maintenance; container/user-namespace
-		 * capabilities are deliberately insufficient.
-		 */
 		fresh_anchor = true;
 	} else if (!req.expected_lease_generation ||
 		   req.expected_lease_generation != lease->generation) {
@@ -461,9 +440,6 @@ static long mx_lease_acquire(struct mx_file_ctx *ctx, unsigned long arg)
 	new_generation = lease->generation;
 	mutex_unlock(&lease->lock);
 
-	/* See mx_lease_transition(): publish outside the lock, undo only what is
-	 * provably still ours. The holder is per-ctx and the fresh anchor is
-	 * identified by the generation this call assigned. */
 	if (!copy_to_user((void __user *)arg, &req, sizeof(req))) {
 		if (state_file)
 			fput(state_file);
@@ -550,10 +526,7 @@ static long mx_lease_transition(struct mx_file_ctx *ctx, unsigned long arg)
 	new_holder = ctx->lease;
 	mutex_unlock(&lease->lock);
 
-	/* Publish with the lock released: a fault here takes mmap_lock, which
-	 * mmap/vm_close hold while waiting for this lock. Undo only if the state
-	 * is still exactly what this call installed; anything else was changed
-	 * by someone who saw the new state and now owns it. */
+	/* INTENTIONAL: copy_to_user outside lease->lock; a fault takes mmap_lock. */
 	if (!copy_to_user((void __user *)arg, &req, sizeof(req)))
 		return 0;
 	mutex_lock(&lease->lock);
@@ -590,7 +563,6 @@ static void mx_lease_init_ofd_lock(struct file_lock *lock, struct file *file,
 {
 	locks_init_lock(lock);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
-	/* 6.9 moved the common fields into struct file_lock_core (c). */
 	lock->c.flc_owner = file;
 	lock->c.flc_flags = FL_POSIX | FL_OFDLCK;
 	lock->c.flc_type = type;
@@ -631,7 +603,6 @@ static struct file *mx_lease_clone_with_ofd_lock(struct file *source,
 	return pinned;
 }
 
-/* Which lock type a test probe reports, across the 6.9 file_lock split. */
 static unsigned char mx_lease_probe_type(const struct file_lock *lock)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
@@ -641,17 +612,6 @@ static unsigned char mx_lease_probe_type(const struct file_lock *lock)
 #endif
 }
 
-/* The canonical slot ABI keeps the identity byte (slot * 2) under an
- * exclusive OFD lock on the claimant's own open file description for the
- * claim's whole lifetime; makeLive() downgrades only the liveness byte. The
- * driver used to trust the marker in f_pos and never checked that, so two
- * descriptions that both skipped the exclusive claim were both admitted to one
- * slot -- and the bakery gate skips its own slot, so neither would ever see
- * the other. Two probes prove it without pinning anything on that byte:
- *   1. from the caller's own description a write probe must find no conflict
- *      (OFD locks never conflict with their own owner), and
- *   2. from a fresh kernel-only description the same probe must conflict.
- * Together they say the exclusive lock exists and belongs to this caller. */
 static int mx_lease_slot_identity_held(struct file *slot_file, u32 slot)
 {
 	const loff_t offset = MX_LEASE_SLOT_IDENTITY_OFFSET(slot);
@@ -662,7 +622,7 @@ static int mx_lease_slot_identity_held(struct file *slot_file, u32 slot)
 	mx_lease_init_ofd_lock(&probe, slot_file, F_WRLCK, offset, offset);
 	ret = vfs_test_lock(slot_file, &probe);
 	if (!ret && mx_lease_probe_type(&probe) != F_UNLCK)
-		ret = -EPERM;	/* a stranger holds the identity byte */
+		ret = -EPERM;
 	locks_release_private(&probe);
 	if (ret)
 		return ret;
@@ -677,16 +637,12 @@ static int mx_lease_slot_identity_held(struct file *slot_file, u32 slot)
 	mx_lease_init_ofd_lock(&probe, clone, F_WRLCK, offset, offset);
 	ret = vfs_test_lock(clone, &probe);
 	if (!ret && mx_lease_probe_type(&probe) == F_UNLCK)
-		ret = -EPERM;	/* nobody holds it: the claim was never made */
+		ret = -EPERM;
 	locks_release_private(&probe);
 	fput(clone);
 	return ret;
 }
 
-/* Retain a separate kernel-only open file description and OFD read lock.
- * The caller only identifies the driver-anchored state inode; it never owns
- * this lock and therefore cannot unlock it. If a fencer already owns the
- * canonical byte, the nonblocking acquisition fails atomically. */
 static struct file *mx_lease_pin_slot_ofd_lock(struct file *source, u32 slot)
 {
 	const loff_t offset = MX_LEASE_SLOT_LIVENESS_OFFSET(slot);
@@ -754,9 +710,6 @@ static long mx_lease_anchor_slot_domain(struct mx_file_ctx *ctx,
 		goto out_unlock;
 	}
 	if (!domain_anchored) {
-		/* Hold a whole-file exclusive OFD lock while publishing the first
-		 * anchor. Any pre-existing POSIX/OFD record lock makes the fresh
-		 * domain ineligible. */
 		exclusive_proof = mx_lease_clone_with_ofd_lock(domain_file,
 					F_WRLCK, 0, OFFSET_MAX);
 		if (IS_ERR(exclusive_proof)) {
@@ -776,8 +729,6 @@ static long mx_lease_anchor_slot_domain(struct mx_file_ctx *ctx,
 	req.grants = mx_lease_holder_grants(ctx, lease->state_path_valid);
 	mutex_unlock(&lease->lock);
 
-	/* Publish outside the lock (see mx_lease_transition). A fresh anchor is
-	 * undone only while it is still the inode this call installed. */
 	if (!copy_to_user((void __user *)arg, &req, sizeof(req)))
 		goto out_files;
 	mutex_lock(&lease->lock);
@@ -903,9 +854,6 @@ static long mx_lease_bind_proofs(struct mx_file_ctx *ctx,
 		ret = -EACCES;
 		goto out_unlock;
 	}
-	/* Pre-bind bootstrap reads are permitted, but an ambiguous timed-out read
-	 * must prevent publication of reclamation proofs and therefore startup.
-	 */
 	if (ctx->direct_count || ctx->transfer_count) {
 		ret = -EBUSY;
 		goto out_unlock;
@@ -981,9 +929,6 @@ static long mx_lease_bind_proofs(struct mx_file_ctx *ctx,
 	}
 	mutex_unlock(&lease->lock);
 
-	/* Publish outside the lock (see mx_lease_transition). If the copy faults,
-	 * detach again only while the ctx still carries exactly the files this
-	 * call installed; the locals then fput them below as on any failure. */
 	if (!copy_to_user((void __user *)arg, req, sizeof(*req))) {
 		if (committed) {
 			slot_file = NULL;
@@ -1007,8 +952,6 @@ static long mx_lease_bind_proofs(struct mx_file_ctx *ctx,
 			ctx->proof_lifetime_tag = 0;
 			ctx->proof_slot = 0;
 		} else {
-			/* Someone rebound or unbound meanwhile; those files are
-			 * no longer ours to drop. */
 			slot_file = NULL;
 			slot_lock_file = NULL;
 			lifetime_file = NULL;
@@ -1070,15 +1013,7 @@ static long mx_lease_unbind_proofs(struct mx_file_ctx *ctx,
 		ret = -ESTALE;
 		goto out_unlock;
 	}
-	/* Revoking the proof must not make an existing BAR mapping disappear
-	 * from the liveness byte while it can still submit direct commands.
-	 * In-flight DMA has independent proof references and can finish after
-	 * unbind, but CPU mappings/direct calls must be gone first. */
 	if (ctx->bar_mapping_count || ctx->direct_count) {
-		/* Every profile that can bind, not only the coordinator pair:
-		 * a hub or standalone workload can bind, mmap the BAR, unbind,
-		 * and keep a VM_PFNMAP mapping alive after a fencer takes the
-		 * write lock and reassigns the slot's memory. */
 		ret = -EBUSY;
 		goto out_unlock;
 	}
@@ -1104,9 +1039,6 @@ static long mx_lease_unbind_proofs(struct mx_file_ctx *ctx,
 	ctx->proof_slot = 0;
 	mutex_unlock(&lease->lock);
 
-	/* Publish outside the lock (see mx_lease_transition). Nothing has been
-	 * fput yet, so on a fault the same files can go back -- but only while
-	 * the ctx is still unbound, i.e. nobody bound anew in between. */
 	if (copy_to_user((void __user *)arg, req, sizeof(*req))) {
 		ret = -EFAULT;
 		mutex_lock(&lease->lock);
@@ -1282,10 +1214,6 @@ void mx_lease_direct_end(struct mx_file_ctx *ctx)
 
 int mx_lease_authorize_no_completion(struct mx_file_ctx *ctx)
 {
-	/* There is no completion record or ordered barrier that can prove when this
-	 * command stopped touching hardware.  Allowing it would make every later
-	 * lease/fence decision a guess, including legacy-to-sandbox handover.
-	 */
 	return ctx ? -EOPNOTSUPP : -EINVAL;
 }
 

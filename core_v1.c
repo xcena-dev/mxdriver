@@ -39,29 +39,14 @@ struct mx_command {
 	};
 };
 
-/*
- * Inline command storage lives in mx_transfer::cmd_inline and is sized by MX_CMD_INLINE_SIZE in mx_dma.h.
- * Enforce the budget at file scope so any future widening of struct mx_command fails the build regardless of
- * whether alloc_mx_command() is called — bumping MX_CMD_INLINE_SIZE is a deliberate, visible change.
- */
 static_assert(sizeof(struct mx_command) <= MX_CMD_INLINE_SIZE,
 	      "struct mx_command exceeds MX_CMD_INLINE_SIZE budget in mx_dma.h");
 
-/******************************************************************************/
-/* Queue helpers                                                              */
-/******************************************************************************/
 static bool is_pushable(struct mx_queue_v1 *queue)
 {
 	static const uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->sq_mbox;
 
-	/*
-	 * Producer contract: every advancer of mbox->ctx.tail holds sq_lock here,
-	 * which the assert below enforces under lockdep builds.  Under that contract the cached free_space is a
-	 * conservative lower bound on the true value (head only grows as HW consumes), so when the cache still has
-	 * headroom for another full command we skip the MMIO readq entirely — v1 profile shows is_pushable() readq at
-	 * ~2.8 % of total cycles in tight submit loops.
-	 */
 	lockdep_assert_held(&queue->common.sq_lock);
 
 	if (get_free_space(mbox) >= data_count * 2)
@@ -77,8 +62,6 @@ static bool is_popable(struct mx_queue_v1 *queue)
 	struct mx_mbox *mbox = &queue->cq_mbox;
 	uint32_t pending_count;
 
-	/* A pong does not count in wait_count; keep polling while a probe is
-	 * in flight, or a pong landing after the last completion is never popped. */
 	if (atomic_read(&queue->common.wait_count) <= 0 &&
 	    !atomic_read(&queue->common.lv_inflight))
 		return false;
@@ -113,12 +96,6 @@ static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 
 	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->head);
 
-	/*
-	 * The completion path consumes only the header (id / control) and
-	 * host_addr (result).  size and device_addr are producer-side fields
-	 * unused on the completion side, so skip the extra 2 readq per pop
-	 * (v1 profile shows pop_mx_command memcpy_fromio at ~6.5 % of total).
-	 */
 	comm->header    = readq(data_addr);
 	comm->host_addr = readq(data_addr + offsetof(struct mx_command, host_addr));
 
@@ -129,9 +106,6 @@ static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
 }
 
-/******************************************************************************/
-/* Queue ops adapter for unified handlers                                     */
-/******************************************************************************/
 static bool v1_is_pushable(struct mx_queue *q)
 {
 	struct mx_queue_v1 *queue = container_of(q, struct mx_queue_v1, common);
@@ -161,7 +135,6 @@ static void v1_pop_completion(struct mx_queue *q, struct mx_completion_info *inf
 	pop_mx_command(queue, &comm);
 	info->id      = comm.id;
 	info->result  = comm.host_addr;
-	/* HW control field carries passthru status on completion */
 	info->status  = comm.control;
 }
 
@@ -185,14 +158,9 @@ static const struct mx_queue_ops v1_queue_ops = {
 	.build_ping_command = build_ping_command_v1,
 };
 
-/******************************************************************************/
-/* Transfer                                                                   */
-/******************************************************************************/
 #define SINGLE_DMA_SIZE		(1 << 10)
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-/* transfer.c slices parallel transfers on host-page boundaries; they must land on chunk
- * boundaries. */
 static_assert((PAGE_SIZE % SINGLE_DMA_SIZE) == 0,
 	      "v1 PRP chunking requires SINGLE_DMA_SIZE to divide PAGE_SIZE");
 
@@ -234,7 +202,6 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 
 	first_len = mx_prp_first_chunk_len(sg, intra_off, SINGLE_DMA_SIZE);
 
-	/* Single mode carries an explicit length, so it needs no chunk boundary to land on. */
 	if (transfer->size <= first_len) {
 		comm->page_mode = MXDMA_PAGE_MODE_SINGLE;
 		comm->host_addr = sg_dma_address(sg) + intra_off;
@@ -297,12 +264,6 @@ static void *create_mx_command_passthru(struct mx_transfer *transfer, int subopc
 	return comm;
 }
 
-/******************************************************************************/
-/* Init                                                                       */
-/******************************************************************************/
-/* qid 48 is the driver-owned internal HIO channel, driven by the submit/complete
- * threads. It is published as mx_pdev->reserved_hio_qid so ioctl_register_mbox
- * rejects any host attempt to register it and double-own this hardware context. */
 #define HMBOX_HIO_QID		48
 #define HMBOX_RQ_OFFSET		0x1000
 #define HIFC_MBOX_BAR_OFFSET	(1ull << 20)

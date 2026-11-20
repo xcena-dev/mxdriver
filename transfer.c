@@ -9,8 +9,6 @@
 #define trace_mx_dma_xfer_wait_exit(dev_id, xfer_id, ret, state)		do { } while (0)
 #endif
 
-/* mx_transfer_wait terminal state. Keep in sync with mx_dma_wait_state_names
- * in trace.h. */
 enum mx_dma_wait_state {
 	MX_DMA_WAIT_COMPLETED		= 0,
 	MX_DMA_WAIT_RECOVERED		= 1,
@@ -18,30 +16,17 @@ enum mx_dma_wait_state {
 	MX_DMA_WAIT_ZOMBIE		= 3,
 };
 
-/* Keep MX_DMA_WAIT_* in sync with mx_dma_wait_state_names in trace.h. */
 static_assert(MX_DMA_WAIT_COMPLETED      == 0, "trace wait_state names out of sync");
 static_assert(MX_DMA_WAIT_RECOVERED      == 1, "trace wait_state names out of sync");
 static_assert(MX_DMA_WAIT_LATE_COMPLETED == 2, "trace wait_state names out of sync");
 static_assert(MX_DMA_WAIT_ZOMBIE         == 3, "trace wait_state names out of sync");
 
-static unsigned int timeout_ms = 60000; /* 60 seconds */
+static unsigned int timeout_ms = 60000;
 module_param(timeout_ms, int, 0644);
 static unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
-/*
- * parallel_split_ratio: split granularity as % of one PRP list
- * (descs_per_list = page_size / sizeof(u64) — 128 on v1, 512 on v2).
- *     0 : legacy per-page split, capped at parallel_count (A/B with main)
- *    50 : default; ~2× splits of ratio=100, empirically best
- *   100 : one split per full descriptor list, no chain at boundary
- *   200 : chain across two lists, half as many splits
- * Sysfs-writable (0644); applies to subsequently submitted transfers only.
- */
 static unsigned int parallel_split_ratio = 50;
 module_param(parallel_split_ratio, uint, 0644);
-/******************************************************************************/
-/* Shared SG context (pin + dma_map_sg done once, shared across split-transfers) */
-/******************************************************************************/
 static void mx_sg_context_release(struct mx_sg_context *ctx)
 {
 	struct device *dev = &ctx->mx_pdev->pdev->dev;
@@ -77,12 +62,6 @@ static struct mx_sg_context *mx_sg_context_get(struct mx_sg_context *ctx)
 	return ctx;
 }
 
-/* The segment-capped helper landed in 5.19. Older upstream kernels and
- * pre-9.2 RHEL trees retain only sg_alloc_table_from_pages(), so this build
- * compatibility path cannot enforce max_seg and may coalesce entries beyond
- * dma_get_max_seg_size()/dma_max_mapping_size(). Supported kernels use the
- * capped helper below; (void) suppresses the unused-parameter warning only.
- */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0) && \
 	RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)
 static inline int mx_sg_alloc_table(struct sg_table *sgt,
@@ -96,13 +75,6 @@ static inline int mx_sg_alloc_table(struct sg_table *sgt,
 #define mx_sg_alloc_table sg_alloc_table_from_pages_segment
 #endif
 
-/*
- * Largest SG entry dma_map_sg() will accept.  Bounce buffering caps a single mapping
- * (dma_max_mapping_size), and honouring it here is what makes dma_set_max_seg_size() effective:
- * sg_alloc_table_from_pages() alone would coalesce past both.  Page-aligned so the split lands
- * on a PRP chunk boundary.  A sub-page limit is not expressible here (the helper rejects one),
- * so it is reported and ignored rather than silently substituted.
- */
 static unsigned int mx_max_sg_segment(struct device *dev)
 {
 	size_t limit = dma_get_max_seg_size(dev);
@@ -120,11 +92,6 @@ static unsigned int mx_max_sg_segment(struct device *dev)
 	return (unsigned int)limit;
 }
 
-/*
- * Create a shared SG mapping for a user buffer; splits attach via mx_sg_context_get/put.
- * Caller owns the initial refcount.  Returns ERR_PTR on failure so callers can distinguish
- * -EFAULT (bad addr) / -EIO (dma_map) / -ENOMEM (alloc); partial state is freed via put.
- */
 static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 		void __user *user_addr, size_t total_size, enum dma_data_direction dir)
 {
@@ -137,13 +104,7 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 
 	offset = offset_in_page((unsigned long)user_addr);
 
-	/* pin_user_pages_fast() takes an int page count and total_size also sets the
-	 * SG entry length; bound the size so the page count can neither overflow int
-	 * nor be truncated below the mapping it must back. The bound also keeps
-	 * kvmalloc_array(pages_nr, sizeof(struct page *)) <= INT_MAX so it does not
-	 * WARN and fail on a large but sub-INT_MAX*PAGE_SIZE request. The integer
-	 * division INT_MAX / sizeof(struct page *) truncates, intentionally leaving
-	 * 7 bytes of headroom below INT_MAX. */
+	/* INTENTIONAL: the bound keeps kvmalloc_array(pages_nr, ptr size) <= INT_MAX. */
 	if (total_size == 0 ||
 	    total_size > ((size_t)INT_MAX / sizeof(struct page *)) * PAGE_SIZE - offset)
 		return ERR_PTR(-EINVAL);
@@ -166,8 +127,6 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	if (pages_nr <= MX_PAGES_INLINE_NR) {
 		ctx->pages = ctx->pages_inline;
 	} else {
-		/* kvmalloc_array: vmalloc fallback past KMALLOC_MAX_SIZE.  Pages array is walked,
-		 * not DMA'd, so physical contiguity is unneeded — removes the ~2 GB per-ioctl cap. */
 		ctx->pages = kvmalloc_array(pages_nr, sizeof(struct page *), GFP_KERNEL | __GFP_ZERO);
 		if (!ctx->pages) {
 			pr_warn("Failed to alloc pages\n");
@@ -181,7 +140,7 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 
 	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, ctx->pages);
 	if (pinned > 0)
-		ctx->pages_nr = pinned; /* tracked so release can unpin */
+		ctx->pages_nr = pinned;
 	if (pinned != pages_nr) {
 		const char *kind = pinned < 0 ? "failed" :
 				   pinned == 0 ? "none" : "partial";
@@ -192,7 +151,6 @@ static struct mx_sg_context *mx_sg_context_create(struct mx_pci_dev *mx_pdev,
 	}
 
 	if (pages_nr <= MX_PAGES_INLINE_NR) {
-		/* Hand-build single-entry sg_table on the inline scatterlist. */
 		sg_init_table(ctx->sg_inline, MX_PAGES_INLINE_NR);
 		sg_set_page(&ctx->sg_inline[0], ctx->pages[0], total_size, offset);
 		sgt->sgl = ctx->sg_inline;
@@ -222,9 +180,6 @@ err:
 	return ERR_PTR(ret);
 }
 
-/******************************************************************************/
-/* MX Transfer                                                                */
-/******************************************************************************/
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	int i;
@@ -284,11 +239,6 @@ fail:
 	return -ENOMEM;
 }
 
-/*
- * Inline-aware free of the hardware command buffer plus the mx_transfer slab entry.
- * Centralised so release_mx_transfer() and drain_zombie_list() cannot drift on the cmd_inline identity check —
- * divergence here would be a use-after-free or double-free in a kernel path.
- */
 static void free_mx_transfer(struct mx_transfer *transfer)
 {
 	if (transfer->command && transfer->command != (void *)transfer->cmd_inline)
@@ -305,7 +255,6 @@ static void release_mx_transfer(struct mx_transfer *transfer)
 	free_mx_transfer(transfer);
 }
 
-/* Base allocator — used directly by ctrl / passthru paths (no SG mapping). */
 static struct mx_transfer *alloc_mx_transfer(void __user *user_addr, size_t size,
 		uint64_t device_addr, enum dma_data_direction dir)
 {
@@ -335,9 +284,6 @@ static struct mx_transfer *alloc_mx_transfer(void __user *user_addr, size_t size
 	return transfer;
 }
 
-/* SG split-transfer attaching to an existing shared sg_context.  Takes one ref on sg_ctx (released
- * when the transfer finishes via destroy_sg / release_mx_transfer).  SG path never reads
- * transfer->user_addr (consumers use sg_ctx->user_addr + sg_byte_offset), so it is left NULL. */
 static struct mx_transfer *alloc_mx_transfer_sg(struct mx_sg_context *sg_ctx,
 		size_t byte_offset, size_t slice_size, uint64_t device_addr)
 {
@@ -353,12 +299,6 @@ static struct mx_transfer *alloc_mx_transfer_sg(struct mx_sg_context *sg_ctx,
 	return transfer;
 }
 
-/*
- * Build `count` split-transfers sharing one sg_context.  Caller's initial
- * sg_ctx reference must be put() after this returns; lifetime then follows
- * the split-transfers.  Splits are page-aligned except for the head (which
- * inherits the buffer's intra-page offset) and the tail (trailing partial page).
- */
 static struct mx_transfer **alloc_mx_transfers(struct mx_sg_context *sg_ctx,
 		uint64_t device_addr_base, int count)
 {
@@ -439,7 +379,6 @@ static bool mx_transfer_remove_from_sq(struct mx_queue *queue, struct mx_transfe
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
 
-/* Read size before teardown frees the transfer. */
 static ssize_t mx_transfer_teardown_done(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	ssize_t size = transfer->size;
@@ -451,7 +390,6 @@ static ssize_t mx_transfer_teardown_done(struct mx_pci_dev *mx_pdev, struct mx_t
 	return size;
 }
 
-/* Never reached HW: release rather than tear down a submitted command. */
 static void mx_transfer_teardown_recovered(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	if (transfer->is_sg)
@@ -465,24 +403,12 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	long left_time;
 	ssize_t ret;
 	int state __maybe_unused;
-	/* Capture id up-front: destroy/release below frees the transfer. */
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
-	/* Snapshot the per-device toggle once so the whole wait sees a consistent
-	 * value even if a sysfs write flips it mid-transfer. */
 	bool lv_on = READ_ONCE(mx_pdev->liveness_enable);
-	/* Sanitize sysfs-writable params: bounded ceiling multiplier, and a
-	 * floored chunk so the wait below never degenerates into a high-frequency
-	 * poll. */
 	unsigned int mult = lv_on ?
 		clamp(READ_ONCE(mx_pdev->liveness_max_mult), 1u, LIVENESS_MAX_MULT_CEIL) : 1;
 
 	{
-		/*
-		 * timeout_ms bounds a stalled transport.  With the liveness watchdog on, a transport that keeps
-		 * responding (lv_health != DEAD) may run a large transfer past timeout_ms, up to an absolute
-		 * ceiling of timeout_ms * liveness_max_mult — which also caps a transfer the device silently
-		 * dropped while still answering other commands.
-		 */
 		unsigned int chunk_ms = lv_on ?
 			max(min(READ_ONCE(mx_pdev->liveness_stall_ms), timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
 		unsigned long hard_deadline =
@@ -492,11 +418,11 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			left_time = wait_for_completion_interruptible_timeout(&transfer->done,
 					msecs_to_jiffies(chunk_ms));
 			if (left_time != 0)
-				break;	/* completed (>0) or interrupted (<0) */
+				break;
 			if (!lv_on)
-				break;	/* legacy: single timeout_ms expiry */
+				break;
 			if (atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD)
-				break;	/* transport dead — fail fast */
+				break;
 		} while (time_before(jiffies, hard_deadline));
 	}
 	if (left_time > 0) {
@@ -509,8 +435,6 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		unsigned long flags;
 		bool dead = lv_on &&
 			    atomic_read(&mx_pdev->io_queue->lv_health) == MX_LIVENESS_DEAD;
-		/* Fail the caller now; the buffer is still reclaimed lazily
-		 * via the zombie path since the device may yet touch it. */
 		ssize_t fail_ret = dead ? -EIO : (left_time == 0 ? -ETIMEDOUT : -EINTR);
 
 		if (left_time == 0) {
@@ -526,7 +450,6 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
 					transfer->id, (uint64_t)transfer->size, transfer->dir);
 
-		/* Not yet pushed to HW: recover cleanly instead of parking a zombie. */
 		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer)) {
 			mx_transfer_teardown_recovered(mx_pdev, transfer);
 			ret = fail_ret;
@@ -534,10 +457,6 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			goto out;
 		}
 
-		/*
-		 * Already pushed to HW. If not known-dead, wait briefly for a late
-		 * completion before teardown; a dead transport fails now.
-		 */
 		if (!dead) {
 			if (wait_for_completion_timeout(&transfer->done,
 						msecs_to_jiffies(1000)) > 0) {
@@ -549,7 +468,6 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 					transfer->id);
 		}
 
-		/* Device may still be writing the buffer — park as zombie for lazy reclaim. */
 		WRITE_ONCE(transfer->is_zombie, true);
 		transfer->zombie_timestamp = jiffies;
 		atomic_inc(&mx_pdev->io_queue->zombie_wait_count);
@@ -573,18 +491,14 @@ static void mx_transfer_wait_work(struct work_struct *work)
 	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
 
 	mx_transfer_wait(mx_pdev, transfer);
-	/* The submitter took this io_ref on our behalf before scheduling us. */
 	percpu_ref_put(&mx_pdev->io_ref);
 }
 
 static void mx_transfer_schedule_wait(struct mx_pci_dev *mx_pdev,
 				      struct mx_transfer *transfer)
 {
-	/* Every transfer has a freshly initialized work item. A false return means
-	 * that this exact work is already pending/running; that existing owner must
-	 * remain the sole waiter and reclaimer. Never wait/free it a second time. */
 	if (WARN_ON_ONCE(!queue_work(mx_pdev->async_wq, &transfer->work)))
-		percpu_ref_put(&mx_pdev->io_ref);  /* the existing owner keeps its own */
+		percpu_ref_put(&mx_pdev->io_ref);
 }
 
 static int mx_transfer_init_sg(struct mx_file_ctx *ctx,
@@ -595,7 +509,6 @@ static int mx_transfer_init_sg(struct mx_file_ctx *ctx,
 	if (ret)
 		return ret;
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
-	/* IS_ERR() lets a bare NULL through as success, so reject it explicitly. */
 	if (IS_ERR_OR_NULL(transfer->command)) {
 		int ret = transfer->command ? PTR_ERR(transfer->command) : -ENOMEM;
 
@@ -614,7 +527,7 @@ static int mx_transfer_init_sg(struct mx_file_ctx *ctx,
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	desc_list_free(mx_pdev, transfer);
-	release_mx_transfer(transfer); /* drops sg_ctx reference */
+	release_mx_transfer(transfer);
 }
 
 static ssize_t mx_transfer_submit_sg_one(struct mx_file_ctx *ctx,
@@ -661,9 +574,6 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_file_ctx *ctx,
 	}
 
 	if (ret < 0) {
-		/* Every index gets the full teardown regardless of how far init got: the one
-		 * that failed may already hold a desc list, and the ones never attempted have
-		 * an empty list that desc_list_free() ignores. */
 		for (i = 0; i < count; i++)
 			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
 
@@ -678,7 +588,6 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_file_ctx *ctx,
 	mx_transfer_queue_parallel(mx_pdev->io_queue, transfers, count);
 
 	if (nowait) {
-		/* One io_ref per waiter, dropped by mx_transfer_wait_work(). */
 		percpu_ref_get_many(&mx_pdev->io_ref, count);
 		for (i = 0; i < count; i++)
 			mx_transfer_schedule_wait(mx_pdev, transfers[i]);
@@ -699,11 +608,6 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_file_ctx *ctx,
 	return err ? err : transferred;
 }
 
-/*
- * Submit a (possibly split) SG data transfer.  Even when count==1 we wrap the
- * buffer in a shared sg_context so single and parallel paths share the same
- * destroy / zombie semantics.
- */
 static ssize_t mx_transfer_submit_sg_split(struct mx_file_ctx *ctx,
 		struct mx_pci_dev *mx_pdev,
 		void __user *buf, size_t size, uint64_t device_addr,
@@ -721,7 +625,7 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_file_ctx *ctx,
 		struct mx_transfer *transfer;
 
 		transfer = alloc_mx_transfer_sg(sg_ctx, 0, size, device_addr);
-		mx_sg_context_put(sg_ctx); /* drop creator ref; transfer owns one now */
+		mx_sg_context_put(sg_ctx);
 		if (!transfer) {
 			pr_warn("Failed to alloc mx_transfer\n");
 			return -ENOMEM;
@@ -730,7 +634,7 @@ static ssize_t mx_transfer_submit_sg_split(struct mx_file_ctx *ctx,
 	}
 
 	transfers = alloc_mx_transfers(sg_ctx, device_addr, count);
-	mx_sg_context_put(sg_ctx); /* drop creator ref; splits own their refs */
+	mx_sg_context_put(sg_ctx);
 	if (!transfers) {
 		pr_warn("Failed to alloc parallel mx_transfers (count=%d)\n", count);
 		return -ENOMEM;
@@ -808,20 +712,6 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_file_ctx *ctx,
 	return mx_transfer_wait(mx_pdev, transfer);
 }
 
-/******************************************************************************/
-/* Functions for fops                                                         */
-/******************************************************************************/
-
-/*
- * Decide how many splits to break a buffer into.
- *   ratio == 0 : legacy page-based, count = nr_pages capped at parallel_count (A/B with main).
- *   ratio  > 0 : descriptor-based using
- *     dma_size        = mx_pdev->page_size                  (PRP entry granularity)
- *     descs_per_list  = dma_size / sizeof(u64)              (v1: 128, v2: 512)
- *     descs_per_split = descs_per_list * ratio / 100        (one split's PRP capacity)
- *     total_descs     = ceil(size / dma_size)
- *     count           = ceil(total_descs / descs_per_split), then capped at parallel_count and nr_pages.
- */
 static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, size_t size)
 {
 	uintptr_t first_page = (uintptr_t)buf >> PAGE_SHIFT;
@@ -843,18 +733,12 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 	if (descs_per_split < 1)
 		descs_per_split = 1;
 
-	/* size_t math + INT_MAX clamp: v1 (dma_size=1024) would overflow int total_descs at size > 2 TiB;
-	 * the size_t intermediate lifts that ceiling past the pin_user_pages_fast int-nr_pages limit
-	 * (~8 TiB), but mx_sg_context_create now caps transfers to ~1 TiB via its
-	 * kvmalloc_array(pages_nr) bound, so that cap is the effective limit. */
 	total_descs = DIV_ROUND_UP(size, dma_size);
 	raw_count = DIV_ROUND_UP(total_descs, (size_t)descs_per_split);
 	count = (int)min_t(size_t, raw_count, INT_MAX);
 	if (count < 1)
 		count = 1;
 
-	/* Clamp upper to nr_pages: alloc_mx_transfers splits by pages, so count > nr_pages would yield
-	 * zero-byte splits and submit undefined DMA.  Lower clamp to 1 guards parallel_count=0 div-by-zero. */
 	count = min_t(int, count, nr_pages);
 	count = min_t(int, count, parallel_count);
 	return max_t(int, count, 1);
@@ -928,26 +812,15 @@ ssize_t write_ctrl_to_device(struct mx_file_ctx *ctx,
 	return mx_transfer_submit_ctrl(ctx, mx_pdev, transfer, opcode, nowait);
 }
 
-/******************************************************************************/
-/* Protocol transfer (HIO Send/Recv)                                          */
-/******************************************************************************/
 ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf,
 		size_t size, int opcode)
 {
 	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
-	/*
-	 * HIO Send/Recv both perform H2D and D2H on the same host buffer:
-	 *   Send: H2D(full buffer) -> firmware -> D2H(status in command page)
-	 *   Recv: H2D(command page) -> firmware -> D2H(response in full buffer)
-	 * DMA_BIDIRECTIONAL is required.  Treated as a single transfer (no split).
-	 */
+	/* INTENTIONAL: HIO send and recv each DMA both ways on this one buffer. */
 	return mx_transfer_submit_sg_split(ctx, mx_pdev, buf, size, 0,
 			DMA_BIDIRECTIONAL, opcode, 1, false);
 }
 
-/******************************************************************************/
-/* Passthrough command                                                        */
-/******************************************************************************/
 long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 			     uint64_t device_addr, uint64_t size, bool no_completion,
 			     uint8_t *out_status, uint64_t *out_host_addr)
@@ -987,25 +860,11 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
 
 	if (no_completion) {
-		/*
-		 * HW guarantees no completion for this command.  The submit
-		 * handler signals transfer->done once the command is pushed, so
-		 * we only wait for the push.  Use an interruptible, bounded wait
-		 * so a wedged SQ that never pushes cannot hang the caller in an
-		 * unkillable D state.
-		 */
 		left_time = wait_for_completion_interruptible_timeout(&transfer->done,
 				msecs_to_jiffies(timeout_ms));
 		if (left_time <= 0) {
 			long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
 
-			/*
-			 * done is signaled only after the push, so a timeout means
-			 * the command was never pushed — reclaim it.  If it raced
-			 * and was just pushed (removal fails), the push path has
-			 * signaled done; consume that hand-off before freeing so
-			 * the submit handler is finished with the transfer.
-			 */
 			if (!mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer))
 				wait_for_completion(&transfer->done);
 			release_mx_transfer(transfer);
@@ -1051,9 +910,6 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 	return 0;
 }
 
-/******************************************************************************/
-/* Zombie Transfer Cleanup                                                   */
-/******************************************************************************/
 static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list)
 {
 	struct mx_transfer *transfer, *tmp;
@@ -1073,16 +929,9 @@ static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list
 		if (transfer->is_sg)
 			desc_list_free(mx_pdev, transfer);
 
-		/* release_mx_transfer drops the sg_context ref (if any), frees the IDR id, and the slab entry.
-		 * Last split on an sg_context triggers dma_unmap_sg + unpin_user_pages on its put(). */
 		release_mx_transfer(transfer);
 	}
 
-	/*
-	 * Until here a CQ-reaped zombie hides one live command from mx_queue_live_count(),
-	 * and no submission reports it coming back: wake the submit thread, whose wait on
-	 * that count may be unbounded, so the liveness watchdog re-arms.
-	 */
 	if (drained)
 		swake_up_one(&mx_pdev->io_queue->sq_wait);
 }
@@ -1100,7 +949,6 @@ int zombie_cleanup_handler(void *data)
 		if (kthread_should_stop())
 			break;
 
-		/* Collect zombies ready for cleanup */
 		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &mx_pdev->zombie_list, zombie_entry) {
 			bool hw_done = (atomic_read(&transfer->wait_claimed) == 1);
@@ -1115,9 +963,6 @@ int zombie_cleanup_handler(void *data)
 		drain_zombie_list(mx_pdev, &to_cleanup);
 	}
 
-	/* Final force-drain is legal only after protocol completion/queue deletion
-	 * or permanent physical disconnect. Clearing PCI Bus Master alone does not
-	 * cancel an internal command that could resume after rebind. */
 	if (!READ_ONCE(mx_pdev->dma_reclaim_safe))
 		return 0;
 	spin_lock_irqsave(&mx_pdev->zombie_lock, flags);

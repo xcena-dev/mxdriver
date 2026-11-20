@@ -9,7 +9,6 @@ int transfer_id_alloc(void *ptr)
 {
 	int id;
 
-	/* Preload outside the lock so the cyclic alloc under id_lock never sleeps. */
 	idr_preload(GFP_KERNEL);
 	spin_lock(&id_lock);
 	id = idr_alloc_cyclic(&mx_ids, ptr, 0, MX_PING_ID, GFP_NOWAIT);

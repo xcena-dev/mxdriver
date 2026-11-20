@@ -9,15 +9,10 @@
 #include <linux/delay.h>
 #include <linux/version.h>
 
-/* RHEL ships a 5.14 kernel but backports later mainline APIs, so a bare
- * LINUX_VERSION_CODE test picks the wrong branch; guards below also gate on
- * RHEL_RELEASE_CODE, stubbed here to lose every comparison off RHEL. */
 #ifndef RHEL_RELEASE_CODE
 #define RHEL_RELEASE_CODE 0
 #endif
 #ifndef RHEL_RELEASE_VERSION
-/* Sentinel valid only against RHEL_RELEASE_CODE==0 (0>=1 false, 0<1 true);
- * never compare two RHEL_RELEASE_VERSION() values while this stub is active. */
 #define RHEL_RELEASE_VERSION(a, b) 1
 #endif
 #include <linux/errno.h>
@@ -72,19 +67,8 @@
 #define LIVENESS_DEAD_MS_DEFAULT	5000u
 #define LIVENESS_MAX_MULT_DEFAULT	10u
 
-/*
- * Single-page fast path: embed one struct page * and one scatterlist inside
- * mx_transfer so the 8 B / sub-page hot path skips kcalloc(pages) and
- * sg_alloc_table_from_pages().  Multi-page transfers still fall back to the
- * dynamic allocations in map_user_addr_to_sg().
- */
 #define MX_PAGES_INLINE_NR	1
 
-/*
- * Inline storage for the hardware command struct.  Sized to the larger of the v1 / v2 struct mx_command definitions
- * (v1=32 B, v2=64 B).  Enforced by static_assert alongside each struct mx_command definition in core_v1.c /
- * core_v2.c, so bumping either struct past this limit fails the build instead of silently overrunning.
- */
 #define MX_CMD_INLINE_SIZE	64
 
 enum {
@@ -137,12 +121,12 @@ static const char * const mxdma_op_name[] __maybe_unused = {
 	"PING(11)",
 };
 
-#define MX_PING_ID		((1 << 16) - 1)	/* reserved xfer id for watchdog ping (excluded from IDR) */
+#define MX_PING_ID		((1 << 16) - 1)
 
 enum mx_liveness_health {
-	MX_LIVENESS_UNKNOWN	= 0,	/* liveness disabled / no capability (ioctl sentinel) */
+	MX_LIVENESS_UNKNOWN	= 0,
 	MX_LIVENESS_ALIVE	= 1,
-	MX_LIVENESS_SUSPECT	= 2,	/* probe sent, awaiting confirmation */
+	MX_LIVENESS_SUSPECT	= 2,
 	MX_LIVENESS_DEAD	= 3,
 };
 
@@ -176,11 +160,6 @@ struct mx_mbox {
 	struct mutex lock;
 };
 
-/*
- * Shared SG mapping for parallel data transfers.  One sg_context per user buffer (pinned pages +
- * dma_map_sg run once); each split-transfer takes one refcount and the last put() tears it down.
- * Assumes cache-coherent DMA (x86/CXL); non-coherent platforms would need per-split dma_sync_sg_*.
- */
 struct mx_sg_context {
 	refcount_t refcount;
 	struct mx_pci_dev *mx_pdev;
@@ -192,10 +171,6 @@ struct mx_sg_context {
 	struct page **pages;
 	int pages_nr;
 
-	/*
-	 * Inline fast-path: when pages_nr <= MX_PAGES_INLINE_NR (single-page transfers) pages and
-	 * sgt.sgl point into these arrays; free paths detect inline use by pointer identity.
-	 */
 	struct page		*pages_inline[MX_PAGES_INLINE_NR];
 	struct scatterlist	 sg_inline[MX_PAGES_INLINE_NR];
 };
@@ -204,14 +179,12 @@ struct mx_file_ctx;
 
 struct mx_transfer {
 	int id;
-	void __user *user_addr;		/* ctrl/passthru target; NULL for SG transfers */
+	void __user *user_addr;
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
 
 	struct mx_pci_dev *mx_pdev;
-	/* The issuing OFD and both userspace reclamation proofs remain live until
-	 * this command reaches a terminal/recovered state. */
 	struct mx_file_ctx *owner_ctx;
 	struct file *slot_proof_file;
 	struct file *lifetime_proof_file;
@@ -223,29 +196,21 @@ struct mx_transfer {
 	uint64_t result;
 	bool is_sg;
 
-	/* Passthrough command support */
 	bool     no_completion;
 	uint8_t  status;
 
-	/* Zombie transfer handling */
 	bool is_zombie;
-	atomic_t wait_claimed;	/* 0=unclaimed, 1=wait_count decremented */
+	atomic_t wait_claimed;
 	unsigned long zombie_timestamp;
 	struct list_head zombie_entry;
 
-	/* SG slice: only valid when is_sg=true; NULL for ctrl/passthru. */
 	struct mx_sg_context *sg_ctx;
-	size_t sg_byte_offset;		/* byte offset into sg_ctx->sgt for this split */
+	size_t sg_byte_offset;
 
-	/* Per-split HW descriptor list (each engine gets its own PRP chain). */
 	int desc_list_cnt;
 	void **desc_list_va;
 	dma_addr_t *desc_list_ba;
 
-	/*
-	 * Inline command storage.  Free paths detect inline use by pointer
-	 * identity (command == cmd_inline) and skip kfree.
-	 */
 	uint8_t			 cmd_inline[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
@@ -258,9 +223,6 @@ struct mx_char_dev {
 	unsigned long magic;
 	struct mx_pci_dev *mx_pdev;
 	struct cdev cdev;
-	/* Embedded so cdev_device_add() parents the cdev kobject on it:
-	 * the node then outlives every open file,
-	 * and its release drops the mx_pci_dev reference it holds. */
 	struct device dev;
 	dev_t cdev_no;
 	int type;
@@ -274,10 +236,6 @@ struct mx_char_dev {
 struct mx_device_lease {
 	struct mutex lock;
 	struct mx_lease_sm state;
-	/* A path reference pins inode+dentry+mount identity without retaining the
-	 * publisher's open file description (and therefore without retaining its
-	 * OFD locks after process exit).
-	 */
 	struct path state_path;
 	bool state_path_valid;
 	struct inode *state_inode;
@@ -306,15 +264,12 @@ struct mx_file_ctx {
 	u32 proof_slot;
 	u32 transfer_count;
 	u32 direct_count;
-	u32 bar_mapping_count; /* shared VMA objects, including forked survivors */
+	u32 bar_mapping_count;
 	bool proofs_ever_bound;
 };
 
 struct mx_bar_map;
 
-/* One per mmap() call, shared by every VMA fork/split makes from it. It pins
- * the owning file context (so the lease keeps seeing the mapper) and the
- * device (so the lease lock is valid in vm_close) until the last copy closes. */
 struct mx_bar_vma {
 	struct mx_bar_map *bar_map;
 	struct mx_pci_dev *mx_pdev;
@@ -332,10 +287,6 @@ struct mx_completion_info {
 
 struct mx_queue_ops {
 	bool (*is_pushable)(struct mx_queue *q);
-	/*
-	 * command may live inside the transfer, which the device's completion can
-	 * free as soon as the command is published: copy it out before publishing.
-	 */
 	void (*push_command)(struct mx_queue *q, void *command);
 	void (*post_submit)(struct mx_queue *q);
 
@@ -356,12 +307,11 @@ struct mx_queue {
 	struct swait_queue_head cq_wait;
 	const struct mx_queue_ops *ops;
 
-	/* Transport liveness watchdog (io_queue only) */
-	atomic_t lv_health;		/* enum mx_liveness_health */
-	atomic_t lv_inflight;		/* 0/1: submits held until a pong or completion */
-	u64 lv_sent_ns;			/* when the current ping was pushed (dead-budget + RTT) */
-	unsigned long lv_progress_jiffies; /* last completion, or batch start */
-	u64 lv_rtt_ns;			/* pong RTT; under-reads after a re-probe (same ping id) */
+	atomic_t lv_health;
+	atomic_t lv_inflight;
+	u64 lv_sent_ns;
+	unsigned long lv_progress_jiffies;
+	u64 lv_rtt_ns;
 	uint8_t lv_ping_cmd[MX_CMD_INLINE_SIZE] __aligned(8);
 };
 
@@ -369,35 +319,22 @@ struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
 	int (*recover_queue) (struct mx_pci_dev *);
-	/* Frees what init_queue allocated,
-	 * once release_queue has stopped everything that used it. */
 	void (*free_queue) (struct mx_pci_dev *);
-	/* Returns the command, or ERR_PTR(-errno) — notably -EINVAL for a layout no PRP list can
-	 * express, which the caller must not mistake for memory pressure. */
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
-	/* Returns the command, or ERR_PTR(-errno). */
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
 } __randomize_layout;
 
-/* Refcounted separately because BAR VMAs can outlive mx_pci_dev. */
 struct mx_bar_map {
 	struct kref kref;
-	/* Also protects mx_pci_dev.enabled and sq_mbox_list while they exist. */
 	struct mutex lock;
-	/* Track mappings before the kernel links their VMAs into i_mmap. */
 	unsigned int count;
-	/* Used to revoke BAR PTEs during teardown. NULL when count is zero. */
 	struct address_space *mapping;
 };
 
 struct mx_pci_dev {
 	unsigned long magic;
-	/* Not devm: open files and BAR VMAs outlive the PCI unbind.
-	 * Held once by probe and once per character device. */
 	struct kref ref;
-	/* Held by every running fops body and every queued nowait wait-work;
-	 * teardown kills it and waits for zero before freeing the queues and mailboxes they use. */
 	struct percpu_ref io_ref;
 	wait_queue_head_t io_quiesce_wq;
 	int dev_id;
@@ -432,8 +369,6 @@ struct mx_pci_dev {
 	unsigned int saved_min_align_mask;
 	int attach_error;
 
-	/* Per-device liveness watchdog config, exposed under the liveness/ sysfs
-	 * group. Off by default; a host service enables it only on ping-capable FW. */
 	bool liveness_enable;
 	unsigned int liveness_stall_ms;
 	unsigned int liveness_dead_ms;
@@ -442,8 +377,6 @@ struct mx_pci_dev {
 	void __iomem *bar;
 	resource_size_t bar_mapped_size;
 
-	/* Set once request_threaded_irq() succeeds so teardown only frees an IRQ
-	 * that was actually requested. */
 	bool irq_requested;
 
 	struct mx_bar_map *bar_map;
@@ -455,8 +388,6 @@ struct mx_pci_dev {
 	struct mx_queue *admin_queue;
 	struct mx_queue *io_queue;
 
-	/* qid owned by the driver's internal channel; host registration of it is
-	 * rejected. -1 = none (set per hardware revision). */
 	int reserved_hio_qid;
 
 	struct mx_mbox *sq_mbox_list[MAX_NUM_OF_MBOX];
@@ -472,24 +403,15 @@ struct mx_pci_dev {
 	size_t page_size;
 	struct dma_pool *page_pool;
 
-	/* Zombie transfer cleanup */
 	struct list_head zombie_list;
 	spinlock_t zombie_lock;
 	struct task_struct *zombie_cleanup_thread;
 
-	/* Registered with no constraint; holds the cpu_latency_qos_us module
-	 * parameter while the device is in the registry (init.c). */
 	struct pm_qos_request cpu_latency_req;
 };
 
 extern const struct file_operations *mxdma_fops_array[];
 
-/*
- * Dedicated slab cache for struct mx_transfer.  Sized exactly to the
- * transfer and tagged SLAB_HWCACHE_ALIGN so per-op alloc/free hits a
- * hot per-cpu magazine instead of the generic kmalloc-256/512 buckets.
- * Created in mxdma_init(), destroyed in mxdma_exit().
- */
 extern struct kmem_cache *mx_transfer_cache;
 
 int transfer_id_alloc(void *ptr);
@@ -536,27 +458,16 @@ ssize_t submit_protocol_transfer(struct mx_file_ctx *ctx, char __user *buf, size
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
 
-/* core_common.c */
 int mx_get_list_count(size_t total_desc_cnt, int descs_per_list);
-/* Counts PRP descriptors into *out_cnt.  Returns -EINVAL for a zero-length slice, a mapping
- * shorter than byte_size, or a layout no PRP list can express: an SG entry ending off a dma_size
- * boundary with data still to come, or a later entry starting off one.  See core_common.c. */
 int mx_get_total_desc_count(struct scatterlist *sg, size_t intra_off, size_t byte_size,
 			    size_t dma_size, size_t *out_cnt);
-/* Builds the descriptor chain and reports its bus address through *out_ba.  Returns -EINVAL for
- * a layout the walk cannot express, or the allocator's error; *out_ba is 0 on any failure. */
 int mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
 		      size_t dma_size, int descs_per_list, bool skip_first_entry,
 		      size_t desc_cnt, uint64_t *out_ba);
 
-/* Locate SG entry containing byte_offset in sgt's DMA mapping; *out_intra is the byte offset into
- * that entry.  Returns 0 on hit, -EINVAL if byte_offset is past the mapping.  See core_common.c. */
 int mx_sg_locate(struct sg_table *sgt, size_t byte_offset,
 		 struct scatterlist **out_sg, size_t *out_intra);
 
-/* First PRP chunk length at (sg, intra_off); splits fall on dma_size boundaries of the mapped
- * DMA address, clamped to the entry's remaining bytes.  dma_size must be a power of 2.
- * See core_common.c. */
 size_t mx_prp_first_chunk_len(struct scatterlist *sg, size_t intra_off, size_t dma_size);
 
 void mx_queue_common_init(struct mx_queue *q, struct mx_pci_dev *mx_pdev, const struct mx_queue_ops *ops);
@@ -564,7 +475,6 @@ int mx_start_io_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *q);
 void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
 void mx_queue_submit(struct mx_queue *q, struct mx_transfer **transfers, int count);
 
-/* Ctrl writes carry their payload inline in the command's doorbell slot. */
 static inline int mx_fill_ctrl_doorbell(struct mx_transfer *transfer, uint64_t *doorbell)
 {
 	if (transfer->dir != DMA_TO_DEVICE)
@@ -586,11 +496,6 @@ static inline int mx_fill_ctrl_doorbell(struct mx_transfer *transfer, uint64_t *
 int mx_submit_handler(void *arg);
 int mx_complete_handler(void *arg);
 
-/*
- * Wake the complete handler so its CPU leaves idle in parallel with userspace
- * transfer setup (page pinning, DMA mapping, command build). The submitter
- * pushes the command itself (mx_queue_submit()), so the submit thread is not woken.
- */
 static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_queue *q = mx_pdev ? mx_pdev->io_queue : NULL;
@@ -600,14 +505,6 @@ static inline void mx_prewake_handlers(struct mx_pci_dev *mx_pdev)
 	swake_up_one(&q->cq_wait);
 }
 
-/*
- * Restrict io handler kthreads to the device-local NUMA node so their
- * cache traffic (descriptor ring, sq/cq_wait, transfer structs) stays
- * node-local.  This is a soft affinity hint via set_cpus_allowed_ptr,
- * not a hard kthread_bind: operators can still override with taskset
- * to colocate handlers with a specific userspace CPU.  No-op when the
- * device has no NUMA affinity or the node cpumask is empty.
- */
 static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 {
 	const struct cpumask *mask;
@@ -624,11 +521,6 @@ static inline void mx_bind_handlers_to_numa(struct mx_pci_dev *mx_pdev)
 	if (cpumask_empty(mask))
 		return;
 
-	/*
-	 * set_cpus_allowed_ptr can fail with -EINVAL (PF_NO_SETAFFINITY) or -EAGAIN (hot-unplug race).
-	 * Warn once so operators get a dmesg breadcrumb when handlers silently aren't pinned to the device-local node —
-	 * the affinity is advisory so we don't fail probe here.
-	 */
 	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread))
 		WARN_ON_ONCE(set_cpus_allowed_ptr(mx_pdev->submit_thread, mask));
 	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread))

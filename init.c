@@ -2,28 +2,18 @@
 
 #include "mx_dma.h"
 
-/******************************************************************************/
-/* Initialization                                                             */
-/******************************************************************************/
 static struct class *mxdma_class;
 struct kmem_cache *mx_transfer_cache;
 
-/* Read-only after load: nodes are created with these,
- * and userspace reads them back from sysfs to match the node access, so they are ABI.
- * sysfs prints them in decimal (dev_mode 0660 reads 432). */
+/* INTENTIONAL: read-only ABI; userspace reads these back from sysfs to match node access. */
 static unsigned int dev_gid;
 module_param(dev_gid, uint, 0444);
 static unsigned int dev_mode = 0666;
 module_param(dev_mode, uint, 0444);
 
-/* CXL driver_data belongs to cxl_pci. Both modes use our own embedded
- * registry entries and refcounted allocations, never foreign devres. */
 static LIST_HEAD(mx_device_list_head);
 static DEFINE_MUTEX(mx_device_list_lock);
 
-/* CPU wake-up latency limit (us) held while a device is registered, read as in
- * /dev/cpu_dma_latency: 0 keeps idle CPUs polling, PM_QOS_CPU_LATENCY_DEFAULT_VALUE
- * holds none. A limit keeps every CPU out of C6, so it is opt-in (8 holds C1E). */
 static unsigned int cpu_latency_qos_us = PM_QOS_CPU_LATENCY_DEFAULT_VALUE;
 
 static void mx_apply_cpu_latency_qos_locked(struct mx_pci_dev *mx_pdev)
@@ -33,7 +23,6 @@ static void mx_apply_cpu_latency_qos_locked(struct mx_pci_dev *mx_pdev)
 		cpu_latency_qos_update_request(&mx_pdev->cpu_latency_req, cpu_latency_qos_us);
 }
 
-/* Takes mx_device_list_lock so a device joining the registry cannot miss the new value. */
 static int cpu_latency_qos_us_set(const char *val, const struct kernel_param *kp)
 {
 	struct mx_pci_dev *mx_pdev;
@@ -117,8 +106,6 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 		mx_pdev->readrq_changed = false;
 	}
 	if (mx_pdev->min_align_mask_changed) {
-		/* Ignore the pre-6.12 return value as in the setup path: a bound
-		 * PCI device has dma_parms, and the helper is void on newer kernels. */
 		dma_set_min_align_mask(&pdev->dev,
 				       mx_pdev->saved_min_align_mask);
 		mx_pdev->min_align_mask_changed = false;
@@ -126,7 +113,6 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 	if (mx_pdev->max_seg_size_changed) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0) || \
 	RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
-		/* dma_set_max_seg_size() returns void since 6.10 and in RHEL 9.6. */
 		dma_set_max_seg_size(&pdev->dev, mx_pdev->saved_max_seg_size);
 #else
 		if (dma_set_max_seg_size(&pdev->dev,
@@ -171,8 +157,6 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 		}
 		mx_pdev->pci_enabled_by_driver = true;
 #else
-		/* In notifier mode the bound CXL driver owns PCI enablement. Attaching
-		 * devres or enabling the function behind its back is not reversible. */
 		return -ENODEV;
 #endif
 	}
@@ -274,10 +258,6 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 	u64 selected_dma_mask;
 	unsigned int required_min_align_mask;
 
-	/* The CXL driver owns dev->dma_mask and DMA parameters. Its configured
-	 * mask is also honored by our explicit dma_alloc/map calls. Preserve and
-	 * restore every foreign DMA parameter that this notifier overlay must
-	 * tighten for the MX PRP format. */
 	if (!pdev->dev.dma_mask || !*pdev->dev.dma_mask)
 		return -EINVAL;
 	mx_pdev->saved_dma_mask = *pdev->dev.dma_mask;
@@ -300,7 +280,6 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 	if (mx_pdev->saved_max_seg_size > SZ_1G) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0) || \
 	RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
-		/* dma_set_max_seg_size() returns void since 6.10 and in RHEL 9.6. */
 		dma_set_max_seg_size(&pdev->dev, SZ_1G);
 #else
 		int ret = dma_set_max_seg_size(&pdev->dev, SZ_1G);
@@ -311,28 +290,20 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 		mx_pdev->max_seg_size_changed = true;
 	}
 
-	/* PRP entries carry addresses but no lengths. Preserve intra-page offsets
-	 * when the DMA API uses bounce buffers so all non-final SG entries remain
-	 * page-boundary expressible, matching the standalone path below. */
 	mx_pdev->saved_min_align_mask = dma_get_min_align_mask(&pdev->dev);
 	required_min_align_mask = mx_pdev->saved_min_align_mask |
 				  (PAGE_SIZE - 1);
 	if (required_min_align_mask != mx_pdev->saved_min_align_mask) {
-		/* The helper returns void from 6.12 onward. A bound PCI device has
-		 * dma_parms, so the older return value cannot report failure here. */
 		dma_set_min_align_mask(&pdev->dev, required_min_align_mask);
 		mx_pdev->min_align_mask_changed = true;
 	}
 	return 0;
 #else
-	/* 48-bit addressing capability for MXDMA? */
 	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(48))) {
-		/* use 48-bit DMA */
 		pr_info("use 48-bit DMA\n");
 		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(48)))
 			return -EINVAL;
 	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
-		/* use 32-bit DMA */
 		pr_info("use 32-bit DMA\n");
 		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32)))
 			return -EINVAL;
@@ -340,16 +311,8 @@ static int set_dma_addressing(struct mx_pci_dev *mx_pdev)
 		return -EINVAL;
 	}
 
-	/* scatterlist::dma_length is unsigned int — a single coalesced DMA segment
-	 * exactly at 4 GiB wraps to 0 and breaks length-based SG walks (e.g.
-	 * mx_sg_locate).  Cap so dma_map_sg never produces a 32-bit-overflowing entry. */
 	dma_set_max_seg_size(&pdev->dev, SZ_1G);
 
-	/* PRP carries no lengths, so the device splits chunks by DMA address; SG entries must end
-	 * on chunk boundaries like the pinned user pages do.  Bounce buffers only keep that true
-	 * if they preserve intra-page offsets, so require it as NVMe does. */
-	/* Return value discarded on purpose: it only reports a NULL dev->dma_parms, which
-	 * pci_device_add() always fills in, and the helper returns void from 6.12 on. */
 	dma_set_min_align_mask(&pdev->dev, PAGE_SIZE - 1);
 
 	return 0;
@@ -383,16 +346,11 @@ static ssize_t liveness_enable_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	/* Reset watchdog state and publish the toggle in one sq_lock section;
-	 * the submit handler samples the flag before locking, so publish-first
-	 * could run the watchdog on stale state and false-DEAD a live transfer. */
 	q = mx_pdev->io_queue;
 	if (q) {
 		spin_lock_irqsave(&q->sq_lock, flags);
 		WRITE_ONCE(mx_pdev->liveness_enable, val);
 		atomic_set(&q->lv_inflight, 0);
-		/* Zero, not keep: rtt_ns is only rewritten on a pong, so a re-enable
-		 * would otherwise expose the previous session's RTT indefinitely. */
 		WRITE_ONCE(q->lv_rtt_ns, 0);
 		if (val) {
 			WRITE_ONCE(q->lv_progress_jiffies, jiffies);
@@ -410,9 +368,6 @@ static ssize_t liveness_enable_store(struct device *dev,
 }
 static DEVICE_ATTR(enable, 0644, liveness_enable_show, liveness_enable_store);
 
-/* stall_ms/dead_ms/max_mult share one shape: a per-device uint. Store only
- * parses; the watchdog and transfer read sites sanitize (1 <= stall < dead,
- * mult ceiling), so no bound is enforced here. */
 #define LIVENESS_UINT_ATTR(attr_name, field)					\
 static ssize_t attr_name##_show(struct device *dev,				\
 				struct device_attribute *attr, char *buf)	\
@@ -450,8 +405,6 @@ static const char * const liveness_health_name[] = {
 	[MX_LIVENESS_DEAD]    = "dead",
 };
 
-/* State attrs report the sentinel (unknown / 0) whenever the watchdog is off or
- * the io_queue is gone, never a stale value. */
 static ssize_t health_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
@@ -511,8 +464,6 @@ static void mx_pdev_io_release(struct percpu_ref *ref)
 	wake_up_all(&mx_pdev->io_quiesce_wq);
 }
 
-/* Runs after the last cdev_put() on this node, i.e. once every file that was
- * opened on it is gone. */
 static void mx_cdev_release(struct device *dev)
 {
 	struct mx_char_dev *mx_cdev = container_of(dev, struct mx_char_dev, dev);
@@ -530,7 +481,6 @@ static char *mxdma_type_devnode(const struct device *dev, umode_t *mode, kuid_t 
 		*mode = dev_mode;
 	if (gid)
 		*gid = KGIDT_INIT(dev_gid);
-	/* NULL leaves the node name to the class devnode. */
 	return NULL;
 }
 
@@ -555,8 +505,6 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 	mx_cdev->dev.type = &mxdma_cdev_type;
 	mx_cdev->dev.devt = mx_cdev->cdev_no;
 	mx_cdev->dev.release = mx_cdev_release;
-	/* The ioctl node is the device's control node: hang the liveness/ sysfs
-	 * group off it, with drvdata so its show/store reach mx_pdev. */
 	if (type == MX_CDEV_IOCTL) {
 		mx_cdev->dev.groups = mxdma_dev_groups;
 		dev_set_drvdata(&mx_cdev->dev, mx_pdev);
@@ -580,8 +528,6 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 	return 0;
 
 out_put:
-	/* Drops the reference device_initialize() handed us;
-	 * the release returns the mx_pdev reference taken above. */
 	put_device(&mx_cdev->dev);
 	return ret;
 }
@@ -596,8 +542,6 @@ static void destroy_mx_cdev(struct mx_char_dev *mx_cdev)
 			MAJOR(mx_cdev->cdev_no), MINOR(mx_cdev->cdev_no));
 
 	cdev_device_del(&mx_cdev->cdev, &mx_cdev->dev);
-	/* Probe's reference only. Open files still pin the cdev kobject and,
-	 * through it, this device, so the release waits for the last of them. */
 	put_device(&mx_cdev->dev);
 }
 
@@ -614,22 +558,15 @@ static void mxdma_device_offline(struct mx_pci_dev *mx_pdev)
 	mx_pdev->enabled = false;
 	mutex_unlock(&mx_pdev->bar_map->lock);
 
-	/* Refuse new fops bodies and nowait waiters; the ones already inside
-	 * finish and drop their reference. Idempotent across a re-entered teardown. */
 	if (!percpu_ref_is_dying(&mx_pdev->io_ref))
 		percpu_ref_kill(&mx_pdev->io_ref);
-	/* Sleeping pollers hold no io_ref; wake them so they re-enter and fail. */
 	wake_up_all(&mx_pdev->event.wq);
 }
 
-/* The fence that used to be the io_rwsem write side: every fops body and
- * nowait wait-work that entered before the kill has left. Runs AFTER the
- * protocol drain, so it holds up nothing while the device is still busy. */
 static void mxdma_wait_io_quiesced(struct mx_pci_dev *mx_pdev)
 {
 	unsigned int waited_s = 0;
 
-	/* The wait itself cannot be abandoned, so at least leave a trail while it lasts. */
 	while (!wait_event_timeout(mx_pdev->io_quiesce_wq,
 				   percpu_ref_is_zero(&mx_pdev->io_ref), 10 * HZ)) {
 		waited_s += 10;
@@ -668,12 +605,7 @@ static bool mxdma_pci_permanently_gone(struct mx_pci_dev *mx_pdev)
 	return pci_dev_is_disconnected(mx_pdev->pdev);
 }
 
-/* Wait for every issued command to reach a terminal state. Never times out: a
- * wedged device intentionally blocks unbind, and reboot/reset is the safe
- * recovery rather than releasing pages under an ambiguous command. Returns
- * early only when the PCI device is gone for good. Callers hold no locks and
- * the io_ref fence comes after: draining under a fence used to park every fop
- * entry for as long as the device stayed busy. */
+/* INTENTIONAL: no timeout; freeing DMA under an unfinished command corrupts RAM. */
 static void mxdma_drain_device_protocol(struct mx_pci_dev *mx_pdev,
 					unsigned int *log_ticks)
 {
@@ -695,19 +627,12 @@ static int mxdma_stop_device_protocol(struct mx_pci_dev *mx_pdev,
 	unsigned int log_ticks = 0;
 	int ret = 0;
 
-	/* nowait waiters may outlive the issuing syscall. Drain them before
-	 * inspecting queue counts; each finishes normally or parks a DMA-pinned
-	 * zombie that makes the device fail closed below. */
 	if (mx_pdev->async_wq) {
 		destroy_workqueue(mx_pdev->async_wq);
 		mx_pdev->async_wq = NULL;
 	}
 
 	if (actual_pci_unbind) {
-		/* Normally already idle: destroy_mx_pdev() drained before the io_ref
-		 * fence (see mxdma_drain_device_protocol). A command that slipped
-		 * in between is finished here the same way, so correctness never
-		 * depended on the drain -- only the lock hold time did. */
 		mxdma_drain_device_protocol(mx_pdev, &log_ticks);
 		if (mxdma_pci_permanently_gone(mx_pdev)) {
 			mx_stop_queue_threads(mx_pdev);
@@ -787,9 +712,6 @@ static int mxdma_fence_pci_unbind(struct mx_pci_dev *mx_pdev)
 {
 	struct pci_dev *pdev = mx_pdev->pdev;
 
-	/* This is legal only from the real PCI/CXL unbind path. Protocol proof
-	 * above establishes that no internal command can resume after a later
-	 * rebind; clearing Bus Master only fences already-issued PCI transactions. */
 	pci_clear_master(pdev);
 	while (!pci_wait_for_pending_transaction(pdev)) {
 		if (mxdma_pci_permanently_gone(mx_pdev))
@@ -801,9 +723,6 @@ static int mxdma_fence_pci_unbind(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-/* Returns true only when every DMA-visible allocation was safely released.
- * A false return intentionally leaves queue/page/transfer DMA memory pinned,
- * the registry entry live, and the overlay module self-reference held. */
 static bool destroy_mx_pdev(struct mx_pci_dev *mx_pdev, bool actual_pci_unbind)
 {
 	unsigned int drain_ticks = 0;
@@ -815,19 +734,12 @@ static bool destroy_mx_pdev(struct mx_pci_dev *mx_pdev, bool actual_pci_unbind)
 			return true;
 		if (!actual_pci_unbind)
 			return false;
-		/* Attach failed after an ambiguous admin command. Its BAR/admin backing
-		 * was deliberately retained; the real unbind can now drain the late
-		 * completion and delete any queue it actually created. */
 		mxdma_drain_device_protocol(mx_pdev, &drain_ticks);
 		mxdma_wait_io_quiesced(mx_pdev);
 		goto stop_protocol;
 	}
 	mx_pdev->teardown_started = true;
 	mx_lease_mark_removed(mx_pdev);
-	/* Refuse new entries first (removed + the io_ref kill are what
-	 * mxdma_device_prepare() checks), then let the commands already issued
-	 * finish while nothing is held. Only then wait for the last fops bodies and
-	 * nowait waiters that got in before the kill to leave. */
 	mxdma_device_offline(mx_pdev);
 	wake_up_interruptible_poll(&mx_pdev->event.wq, EPOLLERR | EPOLLHUP);
 	if (actual_pci_unbind)
@@ -864,7 +776,6 @@ stop_protocol:
 		return false;
 	}
 
-	/* Only after protocol proof may BAR/config and DMA allocations be released. */
 	mx_free_registered_mboxes(mx_pdev);
 	if (mx_pdev->page_pool) {
 		dma_pool_destroy(mx_pdev->page_pool);
@@ -910,7 +821,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		return ret;
 	}
 	init_waitqueue_head(&mx_pdev->io_quiesce_wq);
-	/* Every later failure runs through destroy_mx_pdev(), which assumes bar_map exists. */
 	mx_pdev->bar_map = mx_bar_map_alloc();
 	if (!mx_pdev->bar_map) {
 		percpu_ref_exit(&mx_pdev->io_ref);
@@ -922,7 +832,7 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	mx_lease_init(mx_pdev);
 	mx_event_init(mx_pdev);
 	mx_pdev->magic = MAGIC_DEVICE;
-	mx_pdev->pdev = pdev;  /* pinned by the registry attachment (pci_ref_held) */
+	mx_pdev->pdev = pdev;
 	mx_pdev->dev_id = cxl_memdev_id;
 	strscpy(mx_pdev->bdf, dev_name(&pdev->dev), sizeof(mx_pdev->bdf));
 	mx_pdev->liveness_stall_ms = LIVENESS_STALL_MS_DEFAULT;
@@ -971,7 +881,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 		return ret;
 	}
 
-	/* Publish cdevs only after every queue, worker, and DMA pool exists. */
 	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev,
 			mx_pdev->page_size, mx_pdev->page_size, 0);
 	if (!mx_pdev->page_pool)
@@ -985,9 +894,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id,
 	return 0;
 }
 
-/******************************************************************************/
-/* PCI Device Driver Support                                                  */
-/******************************************************************************/
 static const struct pci_device_id pci_ids[] = {
 	{ PCI_DEVICE(XCENA_PCI_VENDOR_ID, PCI_ANY_ID), },
 	{ 0,}
@@ -1091,12 +997,6 @@ static int mxdma_attach_device(struct pci_dev *pdev)
 	if (cxl_memdev_id < 0)
 		return cxl_memdev_id;
 
-	/* Pin both code and the physical pci_dev before any queue/MMIO programming.
-	 * Normal rmmod is therefore EBUSY while an overlay exists; users must first
-	 * unbind the owning PCI/CXL driver so this notifier can prove teardown. */
-	/* A notifier overlay has no pci_driver owner reference, so explicitly pin
-	 * it from pre-programming through CXL UNBIND. The standalone PCI driver
-	 * must retain normal rmmod -> pci_unregister_driver -> .remove semantics. */
 #ifndef CONFIG_WO_CXL
 	if (module_coming)
 		__module_get(THIS_MODULE);
@@ -1129,8 +1029,7 @@ static int mxdma_attach_device(struct pci_dev *pdev)
 		dev_crit(&pdev->dev,
 			 "MXDMA attach failed after ambiguous hardware programming; device pinned unavailable until reset/reboot\n");
 #ifdef CONFIG_WO_CXL
-		/* Keep the PCI function bound to us so no other driver can re-enable
-		 * bus mastering against retained DMA state. */
+		/* INTENTIONAL: succeed so no other driver binds and re-enables bus mastering. */
 		ret = 0;
 #endif
 		return ret;
@@ -1151,16 +1050,12 @@ static void mxdma_detach_device(struct pci_dev *pdev)
 
 	mutex_lock(&mx_device_list_lock);
 	mx_pdev = mxdma_find_device_locked(pdev);
-	/* Claim teardown under the registry lock, as in main: two detach
-	 * callers must never both take the same per-device object. */
 	if (mx_pdev)
 		list_del_init(&mx_pdev->registry_entry);
 	mutex_unlock(&mx_device_list_lock);
 	if (!mx_pdev)
 		return;
 	if (!destroy_mx_pdev(mx_pdev, true)) {
-		/* Unlike a devres-owned baseline object, ambiguous DMA state is
-		 * pinned and must remain discoverable for a later real teardown. */
 		mutex_lock(&mx_device_list_lock);
 		list_add_tail(&mx_pdev->registry_entry, &mx_device_list_head);
 		mx_apply_cpu_latency_qos_locked(mx_pdev);
@@ -1219,8 +1114,6 @@ static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, voi
 
 	switch (action) {
 	case BUS_NOTIFY_BOUND_DRIVER:
-		/* Vendor ID alone is insufficient: vfio-pci and diagnostic drivers
-		 * emit the same notifier event but do not provide the CXL lifecycle. */
 		if (mxdma_is_bound_cxl_pci(pdev)) {
 			ret = mxdma_attach_device(pdev);
 			if (ret)
@@ -1253,9 +1146,6 @@ static void mxdma_enumerate_bound_devices(void)
 
 		if (pdev->vendor != XCENA_PCI_VENDOR_ID)
 			continue;
-		/* BUS_NOTIFY_{BOUND,UNBIND} run under the device lock. Take the same
-		 * lock for init-time enumeration so attach cannot race CXL devres
-		 * teardown between the driver check and queue programming. */
 		device_lock(&pdev->dev);
 		if (mxdma_is_bound_cxl_pci(pdev))
 			ret = mxdma_attach_device(pdev);
@@ -1271,7 +1161,6 @@ static void mxdma_enumerate_bound_devices(void)
 
 static int mxdma_init(void)
 {
-	/* devtmpfs takes mode 0 as unset and makes the node 0600, so sysfs would misreport it. */
 	if (dev_mode == 0 || dev_mode > 0777 || !gid_valid(KGIDT_INIT(dev_gid))) {
 		pr_err("Invalid device node access: dev_mode=%#o dev_gid=%u\n", dev_mode, dev_gid);
 		return -EINVAL;
@@ -1334,8 +1223,6 @@ static int mxdma_init(void)
 			mx_transfer_cache = NULL;
 			class_destroy(mxdma_class);
 		} else {
-			/* Register first, then enumerate. The shared registry deduplicates a
-			 * BOUND event racing this walk. */
 			mxdma_enumerate_bound_devices();
 			mutex_lock(&mx_device_list_lock);
 			mxdma_module_coming = false;
@@ -1363,11 +1250,6 @@ static void mxdma_exit(void)
 	WARN_ON(!list_empty(&mx_device_list_head));
 	mutex_unlock(&mx_device_list_lock);
 
-	/*
-	 * PCI unregister / device-list teardown above completes all in-flight
-	 * transfers (including zombie drain in remove()), so every mx_transfer
-	 * has been returned to the slab before we destroy the cache.
-	 */
 	if (mx_transfer_cache) {
 		kmem_cache_destroy(mx_transfer_cache);
 		mx_transfer_cache = NULL;

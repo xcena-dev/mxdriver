@@ -5,13 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Read version from dkms.conf (single source of truth)
 PACKAGE_NAME=$(sed -n 's/^PACKAGE_NAME="\?\([^"]*\)"\?$/\1/p' dkms.conf)
 PACKAGE_VERSION=$(sed -n 's/^PACKAGE_VERSION="\?\([^"]*\)"\?$/\1/p' dkms.conf)
 [[ -n "${PACKAGE_NAME}" && -n "${PACKAGE_VERSION}" ]] || { echo "[ERROR] Failed to parse dkms.conf"; exit 1; }
 SRC_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 
-# Remove via DKMS if registered
 if command -v dkms >/dev/null 2>&1 && \
    dkms status "${PACKAGE_NAME}/${PACKAGE_VERSION}" 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
     echo "[INFO] Removing ${PACKAGE_NAME} ${PACKAGE_VERSION} from DKMS..."
@@ -19,44 +17,34 @@ if command -v dkms >/dev/null 2>&1 && \
     rm -rf "${SRC_DIR}"
 fi
 
-# Always clean up legacy-installed module (may coexist with DKMS)
 for kdir in /lib/modules/*/updates; do
     rm -f "${kdir}"/mx_dma.ko* 2>/dev/null || true
 done
 depmod -a
 
-# Remove auto-load config
 rm -f /etc/modules-load.d/mx_dma.conf
 
-# Remove load-ordering and initramfs inclusion files
 rm -f /etc/modprobe.d/mx_dma-order.conf
-# mx_dma-access.conf stays: it is the admin's access choice, which the next install keeps.
 rm -f /etc/dracut.conf.d/mx_dma.conf
 if [[ -f /etc/initramfs-tools/modules ]]; then
     sed -i '/^mx_dma$/d' /etc/initramfs-tools/modules
 fi
 
-# Remove the device-access group rule. The group itself is left in place.
 if [[ -f /etc/udev/rules.d/60-xcena-mx_dma.rules ]]; then
     rm -f /etc/udev/rules.d/60-xcena-mx_dma.rules
     udevadm control --reload-rules \
         || echo "[INFO] udevadm reload failed as above; applies at boot."
 fi
 
-# Remove CXL udev helpers
 if [[ -f /usr/local/sbin/xcena_set_devdax_perm ]]; then
     echo "[INFO] Removing xcena_set_devdax_perm..."
     rm -f /usr/local/sbin/xcena_set_devdax_perm
     rm -f /etc/udev/rules.d/99-xcena_set_devdax_perm.rules
-    # Best-effort: udevd is not running during an image build, and what a booted
-    # system reads is the rule file, which is already gone by this point.
     udevadm control --reload-rules \
         || echo "[INFO] udevadm reload failed as above; rule change applies at boot."
     echo "[INFO] xcena_set_devdax_perm removal completed."
 fi
 
-# Update initramfs. -u fails without an image to update, which a root being
-# unpacked for an image build has not got for the kernel uname reports.
 if command -v update-initramfs >/dev/null 2>&1; then
     if [[ -e "/boot/initrd.img-$(uname -r)" ]]; then
         update-initramfs -u -k "$(uname -r)"
