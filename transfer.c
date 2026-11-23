@@ -22,9 +22,32 @@ static_assert(MX_DMA_WAIT_LATE_COMPLETED == 2, "trace wait_state names out of sy
 static_assert(MX_DMA_WAIT_ZOMBIE         == 3, "trace wait_state names out of sync");
 
 static unsigned int timeout_ms = 60000;
-module_param(timeout_ms, int, 0644);
+
+static int timeout_ms_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int ms;
+	int ret;
+
+	ret = kstrtouint(val, 0, &ms);
+	if (ret)
+		return ret;
+	if (ms == 0 || ms > INT_MAX)
+		return -EINVAL;
+
+	timeout_ms = ms;
+	return 0;
+}
+
+static const struct kernel_param_ops timeout_ms_ops = {
+	.set = timeout_ms_set,
+	.get = param_get_uint,
+};
+module_param_cb(timeout_ms, &timeout_ms_ops, &timeout_ms, 0644);
+__MODULE_PARM_TYPE(timeout_ms, "uint");
+MODULE_PARM_DESC(timeout_ms, "Transfer and passthru command timeout in ms, 1 to 2147483647 (default 60000)");
+
 static unsigned int parallel_count = 6;
-module_param(parallel_count, int, 0644);
+module_param(parallel_count, uint, 0644);
 static unsigned int parallel_split_ratio = 50;
 module_param(parallel_split_ratio, uint, 0644);
 static void mx_sg_context_release(struct mx_sg_context *ctx)
@@ -723,7 +746,7 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 	int count;
 
 	if (parallel_split_ratio == 0) {
-		count = min_t(int, nr_pages, parallel_count);
+		count = min_t(unsigned int, nr_pages, parallel_count);
 		return max_t(int, count, 1);
 	}
 
@@ -740,7 +763,7 @@ static int mx_parallel_count_for(struct mx_pci_dev *mx_pdev, void __user *buf, s
 		count = 1;
 
 	count = min_t(int, count, nr_pages);
-	count = min_t(int, count, parallel_count);
+	count = min_t(unsigned int, count, parallel_count);
 	return max_t(int, count, 1);
 }
 
