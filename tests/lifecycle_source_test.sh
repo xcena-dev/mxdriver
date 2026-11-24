@@ -350,9 +350,11 @@ for fn in 'static ssize_t mx_transfer_wait' 'long submit_passthru_command'; do
         exit 1
     fi
 done
-transfer_wait_block=$(sed -n '/^static ssize_t mx_transfer_wait(/,/^}/p' transfer.c)
-if ! grep -Fq 'hard_deadline - now' <<<"$transfer_wait_block"; then
-    echo "a liveness wait must stop at the deadline its timeout log reports" >&2
+transfer_wait_block=$(sed -n '/^static ssize_t mx_transfer_wait(/,/^}/p' transfer.c | tr -s '[:space:]' ' ')
+chunk_cap='if (lv_on) chunk = min(chunk, time_before(now, hard_deadline) ? hard_deadline - now : 0UL);'
+completion_wait='left_time = wait_for_completion_interruptible_timeout(&transfer->done, chunk);'
+if ! grep -Fq "$chunk_cap $completion_wait" <<<"$transfer_wait_block"; then
+    echo "a liveness wait must pass the deadline-capped chunk to the completion wait" >&2
     exit 1
 fi
 passthru_block=$(sed -n '/^long submit_passthru_command(/,/^}/p' transfer.c)
