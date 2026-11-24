@@ -34,7 +34,7 @@ static int timeout_ms_set(const char *val, const struct kernel_param *kp)
 	if (ms == 0 || ms > INT_MAX)
 		return -EINVAL;
 
-	timeout_ms = ms;
+	WRITE_ONCE(timeout_ms, ms);
 	return 0;
 }
 
@@ -428,18 +428,24 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 	int state __maybe_unused;
 	u32 __maybe_unused xfer_id = (u32)transfer->id;
 	bool lv_on = READ_ONCE(mx_pdev->liveness_enable);
+	unsigned int wait_ms = READ_ONCE(timeout_ms);
 	unsigned int mult = lv_on ?
 		clamp(READ_ONCE(mx_pdev->liveness_max_mult), 1u, LIVENESS_MAX_MULT_CEIL) : 1;
 
 	{
 		unsigned int chunk_ms = lv_on ?
-			max(min(READ_ONCE(mx_pdev->liveness_stall_ms), timeout_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : timeout_ms;
+			max(min(READ_ONCE(mx_pdev->liveness_stall_ms), wait_ms), LIVENESS_WAIT_CHUNK_MIN_MSEC) : wait_ms;
 		unsigned long hard_deadline =
-			jiffies + msecs_to_jiffies(timeout_ms) * mult;
+			jiffies + msecs_to_jiffies(wait_ms) * mult;
 
 		do {
-			left_time = wait_for_completion_interruptible_timeout(&transfer->done,
-					msecs_to_jiffies(chunk_ms));
+			unsigned long now = jiffies;
+			unsigned long chunk = msecs_to_jiffies(chunk_ms);
+
+			if (lv_on)
+				chunk = min(chunk, time_before(now, hard_deadline) ?
+					    hard_deadline - now : 0UL);
+			left_time = wait_for_completion_interruptible_timeout(&transfer->done, chunk);
 			if (left_time != 0)
 				break;
 			if (!lv_on)
@@ -467,7 +473,7 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			else
 				pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, ceiling=%lu ms)\n",
 						transfer->id, (uint64_t)transfer->size, transfer->dir,
-						(unsigned long)timeout_ms * mult);
+						(unsigned long)wait_ms * mult);
 		}
 		else
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
@@ -850,6 +856,7 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 {
 	struct mx_pci_dev *mx_pdev = ctx->mx_pdev;
 	struct mx_transfer *transfer;
+	unsigned int wait_ms;
 	long left_time;
 
 	if (!mx_pdev->ops.create_command_passthru)
@@ -881,10 +888,11 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 	trace_mx_dma_xfer_enqueue(mx_pdev->dev_id, transfer->id, IO_OPCODE_PASSTHRU,
 			transfer->dir, transfer->size, false, 0, 1);
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
+	wait_ms = READ_ONCE(timeout_ms);
 
 	if (no_completion) {
 		left_time = wait_for_completion_interruptible_timeout(&transfer->done,
-				msecs_to_jiffies(timeout_ms));
+				msecs_to_jiffies(wait_ms));
 		if (left_time <= 0) {
 			long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
 
@@ -897,7 +905,7 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 		return 0;
 	}
 
-	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
+	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(wait_ms));
 
 	if (left_time <= 0) {
 		unsigned long flags;
@@ -905,7 +913,7 @@ long submit_passthru_command(struct mx_file_ctx *ctx, int subopcode,
 
 		if (left_time == 0)
 			pr_warn("passthru command timeout (subopcode=%d, timeout=%u ms)\n",
-				subopcode, timeout_ms);
+				subopcode, wait_ms);
 		else
 			pr_warn("passthru command interrupted (subopcode=%d)\n", subopcode);
 

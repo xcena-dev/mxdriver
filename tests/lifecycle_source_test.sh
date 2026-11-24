@@ -332,4 +332,35 @@ if grep -Fq 'sq_wait' <<<"$prewake_block"; then
     exit 1
 fi
 
+search_fixed 'WRITE_ONCE(timeout_ms, ms);' transfer.c
+if sed -E 's/READ_ONCE\(timeout_ms\)|WRITE_ONCE\(timeout_ms, ms\)//g' transfer.c | \
+    grep -nE '(^|[^_[:alnum:]])timeout_ms([^_[:alnum:]]|$)' | \
+    grep -Ev '^[0-9]+:static unsigned int timeout_ms = |^[0-9]+:(module_param_cb|__MODULE_PARM_TYPE|MODULE_PARM_DESC)\(timeout_ms, '; then
+    echo "timeout_ms can change through sysfs, so read it only with READ_ONCE()" >&2
+    exit 1
+fi
+if [ "$(grep -o 'READ_ONCE(timeout_ms)' transfer.c | wc -l)" -ne 2 ]; then
+    echo "only mx_transfer_wait() and submit_passthru_command() read timeout_ms, so no helper rereads it" >&2
+    exit 1
+fi
+for fn in 'static ssize_t mx_transfer_wait' 'long submit_passthru_command'; do
+    wait_block=$(sed -n "/^$fn(/,/^}/p" transfer.c)
+    if [ "$(grep -o 'READ_ONCE(timeout_ms)' <<<"$wait_block" | wc -l)" -ne 1 ]; then
+        echo "$fn must read timeout_ms once, so its wait, deadline and log agree" >&2
+        exit 1
+    fi
+done
+transfer_wait_block=$(sed -n '/^static ssize_t mx_transfer_wait(/,/^}/p' transfer.c)
+if ! grep -Fq 'hard_deadline - now' <<<"$transfer_wait_block"; then
+    echo "a liveness wait must stop at the deadline its timeout log reports" >&2
+    exit 1
+fi
+passthru_block=$(sed -n '/^long submit_passthru_command(/,/^}/p' transfer.c)
+passthru_queue_line=$(grep -nF 'mx_transfer_queue(' <<<"$passthru_block" | cut -d: -f1 || true)
+passthru_read_line=$(grep -nF 'READ_ONCE(timeout_ms)' <<<"$passthru_block" | cut -d: -f1)
+if [ -z "$passthru_queue_line" ] || [ "$passthru_read_line" -le "$passthru_queue_line" ]; then
+    echo "a passthru wait starts once the command is queued, so read timeout_ms after mx_transfer_queue()" >&2
+    exit 1
+fi
+
 echo "lifecycle source invariants: PASS"
